@@ -90,7 +90,7 @@ celerybeat.pid
 
 ### IDE & Editor Config ###
 # VS Code
-.vscode/
+.vscode/*
 !.vscode/launch_example.json
 .devcontainer/
 

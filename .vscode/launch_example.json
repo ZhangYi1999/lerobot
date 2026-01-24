@@ -1,0 +1,127 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Teleoperate bimanual so101",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./src/lerobot/scripts/lerobot_teleoperate.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--robot.type=bi_so_follower",
+                "--robot.left_arm_config.port=COM8",
+                "--robot.right_arm_config.port=COM7",
+                "--robot.id=bimanual_follower",
+                "--robot.left_arm_config.cameras={ wrist: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30}, top: {type: opencv, index_or_path: 3, width: 640, height: 480, fps: 30}}",
+                "--robot.right_arm_config.cameras={ wrist: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}",
+                "--teleop.type=bi_so_leader",
+                "--teleop.left_arm_config.port=COM6",
+                "--teleop.right_arm_config.port=COM5",
+                "--teleop.id=bimanual_leader",
+                "--display_data=true"
+            ]
+        },
+        {
+            "name": "Teleoperate single arm so101",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./src/lerobot/scripts/lerobot_teleoperate.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--robot.type=so101_follower",
+                "--robot.port=COM7",
+                "--robot.id=so101_follower_right",
+                "--robot.cameras={ wrist: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}",
+                "--teleop.type=so101_leader",
+                "--teleop.port=COM5",
+                "--teleop.id=so101_leader_right",
+                "--display_data=true"
+            ]
+        },
+        {
+            "name": "Record bimanual so101",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./src/lerobot/scripts/lerobot_record.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--robot.type=bi_so_follower",
+                "--robot.left_arm_config.port=COM8",
+                "--robot.right_arm_config.port=COM7",
+                "--robot.id=bimanual_follower",
+                "--robot.left_arm_config.cameras={ wrist: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30}, top: {type: opencv, index_or_path: 3, width: 640, height: 480, fps: 30}}",
+                "--robot.right_arm_config.cameras={ wrist: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}",
+                "--teleop.type=bi_so_leader",
+                "--teleop.left_arm_config.port=COM6",
+                "--teleop.right_arm_config.port=COM5",
+                "--teleop.id=bimanual_leader",
+                "--display_data=true",
+                "--dataset.repo_id=${HF_USER}/bimanual-so-handover-cube",
+                "--dataset.num_episodes=25",
+                "--dataset.single_task=Grab and handover the red cube to the other arm"
+            ]
+        },
+        {
+            "name": "Calibrate so101 leader (teleop)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./src/lerobot/scripts/lerobot_calibrate.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--teleop.type=so101_leader",
+                "--teleop.port=COM5",
+                "--teleop.id=so101_leader_right"
+            ]
+        },
+        {
+            "name": "Calibrate bimanual leader (teleop)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./src/lerobot/scripts/lerobot_calibrate.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--teleop.type=bi_so_leader",
+                "--teleop.left_arm_config.port=COM6",
+                "--teleop.right_arm_config.port=COM5",
+                "--teleop.id=bimanual_leader"
+            ]
+        },
+        {
+            "name": "Calibrate bimanual follower (robot)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./src/lerobot/scripts/lerobot_calibrate.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--robot.type=bi_so_follower",
+                "--robot.left_arm_config.port=COM8",
+                "--robot.right_arm_config.port=COM7",
+                "--robot.id=bimanual_follower"
+            ]
+        },
+        {
+            "name": "Calibrate single arm leader (teleop)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./src/lerobot/scripts/lerobot_calibrate.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--teleop.type=so101_leader",
+                "--teleop.port=COM6",
+                "--teleop.id=single_arm_leader"
+            ]
+        },
+        {
+            "name": "Calibrate single arm follower (robot)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./src/lerobot/scripts/lerobot_calibrate.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--robot.type=so101_follower",
+                "--robot.port=COM7",
+                "--robot.id=so101_follower_right"
+            ]
+        }
+    ]
+}
