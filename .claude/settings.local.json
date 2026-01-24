@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(conda activate:*)",
+      "Bash(pip install:*)",
+      "Bash(powershell -Command \"conda activate lerobot; pip install eiquadprog\")",
+      "Bash(powershell -Command \"pip index versions eiquadprog 2>&1\")",
+      "Bash(powershell:*)",
+      "WebSearch",
+      "WebFetch(domain:pypi.org)",
+      "Bash(conda run:*)",
+      "Bash(python ./src/lerobot/scripts/lerobot_calibrate.py:*)"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "windows-mcp"
+  ]
+}

@@ -34,6 +34,10 @@ def init_rerun(
         ip: Optional IP for connecting to a Rerun server.
         port: Optional port for connecting to a Rerun server.
     """
+    # Suppress wgpu warnings from Rerun
+    os.environ["RUST_LOG"] = os.getenv("RUST_LOG", "warn,rerun=warn,wgpu_core=error,wgpu_hal=error")
+    os.environ["WGPU_BACKEND"] = os.getenv("WGPU_BACKEND", "gl")
+    
     batch_size = os.getenv("RERUN_FLUSH_NUM_BYTES", "8000")
     os.environ["RERUN_FLUSH_NUM_BYTES"] = batch_size
     rr.init(session_name)

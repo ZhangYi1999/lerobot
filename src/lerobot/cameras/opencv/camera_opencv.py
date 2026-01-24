@@ -304,9 +304,23 @@ class OpenCVCamera(Camera):
         else:
             targets_to_scan = [int(i) for i in range(MAX_OPENCV_INDEX)]
 
+        backend = get_cv2_backend()
         for target in targets_to_scan:
-            camera = cv2.VideoCapture(target)
+            camera = cv2.VideoCapture(target, backend)
             if camera.isOpened():
+                # Verify the camera can actually capture a frame
+                ret, _ = camera.read()
+                if not ret:
+                    camera.release()
+                    continue
+
+                # Verify the camera can be reopened (filters out flaky DSHOW devices)
+                camera.release()
+                camera = cv2.VideoCapture(target, backend)
+                if not camera.isOpened():
+                    camera.release()
+                    continue
+
                 default_width = int(camera.get(cv2.CAP_PROP_FRAME_WIDTH))
                 default_height = int(camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 default_fps = camera.get(cv2.CAP_PROP_FPS)

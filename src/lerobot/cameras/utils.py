@@ -67,3 +67,17 @@ def get_cv2_rotation(rotation: Cv2Rotation) -> int | None:
         return int(cv2.ROTATE_90_COUNTERCLOCKWISE)
     else:
         return None
+
+
+
+def get_cv2_backend() -> int:
+    import platform
+
+    import cv2
+
+    if platform.system() == "Windows":
+        return int(cv2.CAP_MSMF)  # Use MSMF for Windows to support multiple simultaneous cameras
+    # elif platform.system() == "Darwin":  # macOS
+    #     return cv2.CAP_AVFOUNDATION
+    else:  # Linux and others
+        return int(cv2.CAP_ANY)

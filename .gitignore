@@ -91,6 +91,7 @@ celerybeat.pid
 ### IDE & Editor Config ###
 # VS Code
 .vscode/
+!.vscode/launch_example.json
 .devcontainer/
 
 # JetBrains / PyCharm
