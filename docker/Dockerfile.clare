@@ -1,0 +1,66 @@
+# CLARE Training Environment for RunPod
+#
+# Build (from workspace root):
+#   docker build -f lerobot/docker/Dockerfile.clare -t clare-training:latest .
+#
+# Run locally:
+#   docker run --gpus all -it -p 8000:8000 \
+#     -v $(pwd)/lerobot/src:/app/lerobot/src \
+#     -v $(pwd)/peft_lsy/src:/app/peft_lsy/src \
+#     clare-training:latest
+#
+# Run with shell (debugging):
+#   docker run --gpus all -it -p 8000:8000 \
+#     -v $(pwd)/lerobot/src:/app/lerobot/src \
+#     -v $(pwd)/peft_lsy/src:/app/peft_lsy/src \
+#     clare-training:latest /bin/bash
+
+# RunPod base with CUDA 12.8 + cuDNN (Python 3.11, we add 3.12 below)
+FROM runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
+
+# System dependencies for Libero / MuJoCo / tmux
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    tmux ffmpeg \
+    libglib2.0-0 libgl1-mesa-glx libegl1-mesa \
+    libusb-1.0-0-dev libgeos-dev \
+    cmake pkg-config ninja-build \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+       python3.12 python3.12-venv python3.12-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV MUJOCO_GL=egl
+WORKDIR /app
+
+# Create Python 3.12 venv (lerobot requires >=3.12)
+RUN python3.12 -m venv /app/.venv
+ENV PATH="/app/.venv/bin:$PATH"
+
+# Install uv for fast package management
+RUN pip install --no-cache-dir uv
+
+# Install lerobot with libero + peft extras (editable for mount overlay)
+COPY lerobot/ ./lerobot/
+RUN cd lerobot && uv pip install --no-cache -e ".[libero,peft]"
+
+# Install peft_lsy (overrides official peft, editable for mount overlay)
+COPY peft_lsy/ ./peft_lsy/
+RUN cd peft_lsy && uv pip install --no-cache -e .
+
+# FastAPI dependencies for docker_api
+RUN uv pip install --no-cache fastapi uvicorn python-multipart
+
+# Mount points for data and outputs
+RUN mkdir -p /data /output /app/jobs
+
+ENV HF_HOME=/app/.cache/huggingface \
+    TORCH_HOME=/app/.cache/torch
+
+EXPOSE 8000
+
+# Default: start the job management API
+# Override with /bin/bash for interactive debugging
+CMD ["python", "-m", "uvicorn", "lerobot.scripts.clare.docker_api.main:app", \
+     "--host", "0.0.0.0", "--port", "8000"]
