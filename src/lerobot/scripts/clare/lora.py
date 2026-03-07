@@ -13,10 +13,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 import logging
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass
+from pathlib import Path
 from pprint import pformat
 from typing import Any
 
@@ -26,17 +28,10 @@ from termcolor import colored
 from torch.optim import Optimizer
 
 from lerobot.configs import parser
-from lerobot.configs.default import DatasetConfig
 from lerobot.configs.train import TrainPipelineConfig
-from lerobot.datasets.factory import make_dataset, resolve_delta_timestamps, IMAGENET_STATS
+from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.sampler import EpisodeAwareSampler
 from lerobot.datasets.utils import cycle
-from lerobot.datasets.lerobot_dataset import (
-    LeRobotDataset,
-    LeRobotDatasetMetadata,
-    MultiLeRobotDataset,
-)
-from lerobot.datasets.transforms import ImageTransforms
 from lerobot.envs.factory import make_env, make_env_pre_post_processors
 from lerobot.envs.utils import close_envs
 from lerobot.optim.factory import make_optimizer_and_scheduler
@@ -59,56 +54,28 @@ from lerobot.utils.utils import (
     init_logging,
 )
 
+from peft import get_peft_model, PeftConfig, PeftType, PeftModel
+
+
+class PeftWrapperPolicy(torch.nn.Module):
+    def __init__(self, policy: PreTrainedPolicy):
+        super().__init__()
+        self._policy = policy
+
+    @property
+    def policy(self):
+        return self._policy
+
 
 @dataclass
-class ERTrainPipelineConfig(TrainPipelineConfig):
-    replay_dataset: DatasetConfig | None = None
-    replay_num_workers: int = 16
-    replay_batch_size: int = 8
+class PEFTTrainPipelineConfig(TrainPipelineConfig):
+    peft_cfg_path: Path | None = None
+    peft_weight_path: Path | None = None
+    merge_back_to_policy: bool = True
+    max_episodes_rendered: int = 4
 
-    max_episodes_rendered: int = 100
-
-
-
-def make_replay_dataset(cfg: ERTrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDataset:
-    """Handles the logic of setting up delta timestamps and image transforms before creating a dataset.
-
-    Args:
-        cfg (ERTrainPipelineConfig): Config which contains a replay DatasetConfig and a PreTrainedConfig.
-
-    Raises:
-        NotImplementedError: The MultiLeRobotDataset is currently deactivated.
-
-    Returns:
-        LeRobotDataset | MultiLeRobotDataset
-    """
-    image_transforms = (
-        ImageTransforms(cfg.replay_dataset.image_transforms) if cfg.replay_dataset.image_transforms.enable else None
-    )
-
-    if isinstance(cfg.replay_dataset.repo_id, str):
-        ds_meta = LeRobotDatasetMetadata(
-            cfg.replay_dataset.repo_id, root=cfg.replay_dataset.root, revision=cfg.replay_dataset.revision
-        )
-        delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta)
-        dataset = LeRobotDataset(
-            cfg.replay_dataset.repo_id,
-            root=cfg.replay_dataset.root,
-            episodes=cfg.replay_dataset.episodes,
-            delta_timestamps=delta_timestamps,
-            image_transforms=image_transforms,
-            revision=cfg.replay_dataset.revision,
-            video_backend=cfg.replay_dataset.video_backend,
-        )
-    else:
-        raise NotImplementedError("The MultiLeRobotDataset isn't supported for now.")
-
-    if cfg.replay_dataset.use_imagenet_stats:
-        for key in dataset.meta.camera_keys:
-            for stats_type, stats in IMAGENET_STATS.items():
-                dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
-
-    return dataset
+    def __post_init__(self):
+        assert self.peft_cfg_path or self.peft_weight_path, "One from (peft_cfg_path,peft_weight_path) must be specified"
 
 
 def update_policy(
@@ -154,7 +121,7 @@ def update_policy(
 
 
 @parser.wrap()
-def train(cfg: ERTrainPipelineConfig):
+def train(cfg: PEFTTrainPipelineConfig):
     cfg.validate()
 
     from accelerate.utils import DistributedDataParallelKwargs
@@ -184,9 +151,6 @@ def train(cfg: ERTrainPipelineConfig):
 
     logging.info("Creating dataset")
     dataset = make_dataset(cfg)
-
-    logging.info("Creating replay buffer dataset")
-    replay_dataset = make_replay_dataset(cfg)
 
     # Create evaluation environment
     eval_env = None
@@ -234,6 +198,18 @@ def train(cfg: ERTrainPipelineConfig):
         **postprocessor_kwargs,
     )
 
+    logging.info("Wrapping policy with peft module")
+    peft_wrapper_policy = PeftWrapperPolicy(policy=policy)
+
+    if cfg.peft_weight_path:
+        peft_policy = PeftModel.from_pretrained(peft_wrapper_policy, cfg.peft_weight_path, is_trainable=True)
+        peft_config = peft_policy.peft_config["default"]
+    else:
+        peft_cfg = PeftConfig.from_pretrained(cfg.peft_cfg_path)
+        peft_cfg.inference_mode = False
+        peft_policy = get_peft_model(peft_wrapper_policy, peft_cfg)
+        peft_config = peft_policy.peft_config["default"]
+
     logging.info("Creating optimizer and scheduler")
     optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
 
@@ -254,7 +230,7 @@ def train(cfg: ERTrainPipelineConfig):
     logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
     logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
-    # Create dataloaders
+    # Create dataloader
     if hasattr(cfg.policy, "drop_n_last_frames"):
         shuffle = False
         sampler = EpisodeAwareSampler(
@@ -264,17 +240,9 @@ def train(cfg: ERTrainPipelineConfig):
             drop_n_last_frames=cfg.policy.drop_n_last_frames,
             shuffle=True,
         )
-        replay_sampler = EpisodeAwareSampler(
-            replay_dataset.meta.episodes["dataset_from_index"],
-            replay_dataset.meta.episodes["dataset_to_index"],
-            episode_indices_to_use=replay_dataset.episodes,
-            drop_n_last_frames=cfg.policy.drop_n_last_frames,
-            shuffle=True,
-        )
     else:
         shuffle = True
         sampler = None
-        replay_sampler = None
 
     dataloader = torch.utils.data.DataLoader(
         dataset,
@@ -287,24 +255,11 @@ def train(cfg: ERTrainPipelineConfig):
         prefetch_factor=2 if cfg.num_workers > 0 else None,
     )
 
-    replay_dataloader = torch.utils.data.DataLoader(
-        replay_dataset,
-        num_workers=cfg.replay_num_workers,
-        batch_size=cfg.replay_batch_size,
-        shuffle=shuffle,
-        sampler=replay_sampler,
-        pin_memory=device.type == "cuda",
-        drop_last=False,
-        prefetch_factor=2 if cfg.replay_num_workers > 0 else None,
-    )
-
     # Prepare with accelerator
     policy, optimizer, dataloader, lr_scheduler = accelerator.prepare(
         policy, optimizer, dataloader, lr_scheduler
     )
-    replay_dataloader = accelerator.prepare(replay_dataloader)
     dl_iter = cycle(dataloader)
-    replay_dl_iter = cycle(replay_dataloader)
 
     policy.train()
 
@@ -325,17 +280,8 @@ def train(cfg: ERTrainPipelineConfig):
     for _ in range(step, cfg.steps):
         start_time = time.perf_counter()
         batch = next(dl_iter)
-        replay_batch = next(replay_dl_iter)
-        train_tracker.dataloading_s = time.perf_counter() - start_time
-
         batch = preprocessor(batch)
-        replay_batch = preprocessor(replay_batch)
-
-        for key in batch:
-            if isinstance(batch[key], torch.Tensor):
-                batch[key] = torch.cat([batch[key], replay_batch[key]], dim=0)
-            else:
-                batch[key].extend(replay_batch[key])
+        train_tracker.dataloading_s = time.perf_counter() - start_time
 
         train_tracker, output_dict = update_policy(
             train_tracker,
@@ -361,6 +307,34 @@ def train(cfg: ERTrainPipelineConfig):
                     wandb_log_dict.update(output_dict)
                 wandb_logger.log_dict(wandb_log_dict, step)
             train_tracker.reset_averages()
+
+        if cfg.save_checkpoint and is_saving_step:
+            logging.info(f"Checkpoint policy after step {step}")
+            checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
+
+            unwrapped_policy = accelerator.unwrap_model(policy)
+            peft_policy_copy = copy.deepcopy(peft_policy)
+
+            if peft_policy_copy.peft_type == PeftType.LORA:
+                peft_policy_copy.save_pretrained(str(checkpoint_dir / "adapter"))
+                if cfg.merge_back_to_policy:
+                    peft_wrapper_merged = peft_policy_copy.merge_and_unload()
+                    policy_to_save = peft_wrapper_merged._policy
+                else:
+                    policy_to_save = peft_policy_copy.unload()._policy
+            else:
+                peft_policy_copy.save_pretrained(str(checkpoint_dir / "adapter"))
+                policy_to_save = peft_policy_copy.unload()._policy
+
+            save_checkpoint(
+                checkpoint_dir, step, cfg, policy_to_save, optimizer, lr_scheduler,
+                preprocessor=preprocessor, postprocessor=postprocessor,
+            )
+            update_last_checkpoint(checkpoint_dir)
+            if wandb_logger:
+                wandb_logger.log_policy(checkpoint_dir)
+
+            del peft_policy_copy
 
         if cfg.env and eval_env and is_eval_step:
             step_id = get_step_identifier(step, cfg.steps)
@@ -398,18 +372,7 @@ def train(cfg: ERTrainPipelineConfig):
                 wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
                 wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
                 if eval_info.get("overall", {}).get("video_paths"):
-                    wandb_logger.log_video(eval_info["overall"]["video_paths"][-1], step, mode="eval")
-
-        if cfg.save_checkpoint and is_saving_step:
-            logging.info(f"Checkpoint policy after step {step}")
-            checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
-            save_checkpoint(
-                checkpoint_dir, step, cfg, accelerator.unwrap_model(policy), optimizer, lr_scheduler,
-                preprocessor=preprocessor, postprocessor=postprocessor,
-            )
-            update_last_checkpoint(checkpoint_dir)
-            if wandb_logger:
-                wandb_logger.log_policy(checkpoint_dir)
+                    wandb_logger.log_video(eval_info["overall"]["video_paths"][0], step, mode="eval")
 
     if eval_env:
         close_envs(eval_env)
