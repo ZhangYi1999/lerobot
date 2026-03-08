@@ -19,12 +19,15 @@
 FROM runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
 
 # System dependencies for Libero / MuJoCo / tmux
+# Fix apt_pkg: RunPod image breaks the Python→apt_pkg symlink
 RUN apt-get update && apt-get install -y --no-install-recommends \
     software-properties-common \
     tmux ffmpeg \
     libglib2.0-0 libgl1-mesa-glx libegl1-mesa \
     libusb-1.0-0-dev libgeos-dev \
     cmake pkg-config ninja-build \
+    && cd /usr/lib/python3/dist-packages \
+    && cp apt_pkg.cpython-310-x86_64-linux-gnu.so apt_pkg.so 2>/dev/null; true \
     && add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -43,7 +46,7 @@ RUN pip install --no-cache-dir uv
 
 # Install lerobot with libero + peft extras (editable for mount overlay)
 COPY lerobot/ ./lerobot/
-RUN cd lerobot && uv pip install --no-cache -e ".[libero,peft]"
+RUN cd lerobot && uv pip install --no-cache -e ".[all]"
 
 # Install peft_lsy (overrides official peft, editable for mount overlay)
 COPY peft_lsy/ ./peft_lsy/
