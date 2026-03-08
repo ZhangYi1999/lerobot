@@ -25,6 +25,7 @@ Migrated 4 training scripts to the new LeRobot API:
 | `er.py` | `src/lerobot/scripts/clare/er.py` | Experience Replay baseline with replay buffer |
 | `packnet.py` | `src/lerobot/scripts/clare/packnet.py` | PackNet weight pruning baseline |
 | `lora.py` | `src/lerobot/scripts/clare/lora.py` | SeqLoRA with merge-back-to-backbone |
+| `ewc.py` | `src/lerobot/scripts/clare/ewc.py` | EWC baseline: diagonal Fisher + per-task state persistence |
 
 **Key migration changes (all 4 scripts):**
 - `GradScaler` → `Accelerator` (HuggingFace accelerate)
@@ -42,7 +43,21 @@ Migrated 4 training scripts to the new LeRobot API:
 - `train(cfg)`: dispatcher by `cfg.phase`
 - New config fields: `phase: Literal["full", "adapter", "discriminator"]`, `adapter_checkpoint_path: Path | None`
 
-### 3. RunPod Training Infrastructure (commit `5ad4b56d`)
+### 3. GR00T Training Defaults in CLARE Scripts
+
+All 5 CLARE config classes now override LeRobot generic defaults with GR00T N1.5 values:
+
+| Parameter | Value |
+|-----------|-------|
+| `seed` | 42 |
+| `batch_size` | 32 (16+16 for ER) |
+| `steps` | 10_000 |
+| `log_freq` / `save_freq` / `eval_freq` | 100 / 10_000 / 10_000 |
+| `use_policy_training_preset` | **False** (critical — prevents `validate()` from overwriting optimizer/scheduler) |
+| optimizer | AdamW: lr=1e-4, betas=(0.95,0.999), weight_decay=1e-5, grad_clip_norm=1.0 |
+| scheduler | cosine, 500 warmup steps (5% of 10_000) |
+
+### 4. RunPod Training Infrastructure (commit `5ad4b56d`)
 
 | File | Purpose |
 |------|---------|
@@ -64,6 +79,7 @@ Migrated 4 training scripts to the new LeRobot API:
 
 ## Key Technical Notes
 
+- **Episode selection already supported natively**: `DatasetConfig.episodes: list[int] | None` — pass episode indices to load only a subset. Implemented via PyArrow predicate pushdown in `datasets/utils.py:load_nested_dataset()`, filters at Parquet level (memory-efficient). CLI: `--dataset.episodes="[0,1,2]"`. Note: `StreamingLeRobotDataset` accepts the param but does **not** filter (known gap); `LeRobotDataset` (non-streaming, used by CLARE scripts) fully supported.
 - **Libero env already supports single-task eval** via `task_ids` field in `LiberoEnv` config. No code changes needed.
 - **RunPod pytorch images** only go up to Python 3.11. Dockerfile.clare adds Python 3.12 via deadsnakes PPA.
 - **Editable install + mount overlay**: Dockerfile does `pip install -e`, runtime mounts `src/` over the same path. The `.pth` file still works → code changes take effect without rebuild.
