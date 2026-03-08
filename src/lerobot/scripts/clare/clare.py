@@ -35,7 +35,7 @@ from lerobot.envs.factory import make_env, make_env_pre_post_processors
 from lerobot.envs.utils import close_envs
 from lerobot.optim.optimizers import OptimizerConfig, AdamWConfig
 from lerobot.optim.factory import make_optimizer_and_scheduler
-from lerobot.optim.schedulers import LRSchedulerConfig, LRScheduler
+from lerobot.optim.schedulers import LRSchedulerConfig, LRScheduler, DiffuserSchedulerConfig
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.rl.wandb_utils import WandBLogger
@@ -72,6 +72,23 @@ class PeftWrapperPolicy(torch.nn.Module):
 
 @dataclass
 class PEFTTrainPipelineConfig(TrainPipelineConfig):
+    # GR00T training defaults
+    seed: int | None = 42
+    batch_size: int = 32
+    steps: int = 10_000
+    log_freq: int = 100
+    save_freq: int = 10_000
+    eval_freq: int = 10_000
+    use_policy_training_preset: bool = False
+    optimizer: OptimizerConfig | None = field(
+        default_factory=lambda: AdamWConfig(
+            lr=1e-4, betas=(0.95, 0.999), weight_decay=1e-5, eps=1e-8, grad_clip_norm=1.0
+        )
+    )
+    scheduler: LRSchedulerConfig | None = field(
+        default_factory=lambda: DiffuserSchedulerConfig(name="cosine", num_warmup_steps=500)
+    )
+    # CLARE-specific
     peft_cfg_path: Path | None = None
     peft_weight_path: Path | None = None
 

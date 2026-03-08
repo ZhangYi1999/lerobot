@@ -16,7 +16,7 @@
 import logging
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from pprint import pformat
 from typing import Any
@@ -29,6 +29,8 @@ from safetensors.torch import save_file, load_file
 
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
+from lerobot.optim.optimizers import OptimizerConfig, AdamWConfig
+from lerobot.optim.schedulers import LRSchedulerConfig, DiffuserSchedulerConfig
 from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.sampler import EpisodeAwareSampler
 from lerobot.datasets.utils import cycle
@@ -57,6 +59,23 @@ from lerobot.utils.utils import (
 
 @dataclass
 class PackNetTrainPipelineConfig(TrainPipelineConfig):
+    # GR00T training defaults
+    seed: int | None = 42
+    batch_size: int = 32
+    steps: int = 10_000
+    log_freq: int = 100
+    save_freq: int = 10_000
+    eval_freq: int = 10_000
+    use_policy_training_preset: bool = False
+    optimizer: OptimizerConfig | None = field(
+        default_factory=lambda: AdamWConfig(
+            lr=1e-4, betas=(0.95, 0.999), weight_decay=1e-5, eps=1e-8, grad_clip_norm=1.0
+        )
+    )
+    scheduler: LRSchedulerConfig | None = field(
+        default_factory=lambda: DiffuserSchedulerConfig(name="cosine", num_warmup_steps=500)
+    )
+    # PackNet-specific
     current_task: int = 0
     prune_ratio: float = 0.75
     post_prune_steps: int = 20000

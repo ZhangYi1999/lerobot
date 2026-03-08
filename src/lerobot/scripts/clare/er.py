@@ -16,7 +16,7 @@
 import logging
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pprint import pformat
 from typing import Any
 
@@ -29,6 +29,8 @@ from lerobot.configs import parser
 from lerobot.configs.default import DatasetConfig
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.datasets.factory import make_dataset, resolve_delta_timestamps, IMAGENET_STATS
+from lerobot.optim.optimizers import OptimizerConfig, AdamWConfig
+from lerobot.optim.schedulers import LRSchedulerConfig, DiffuserSchedulerConfig
 from lerobot.datasets.sampler import EpisodeAwareSampler
 from lerobot.datasets.utils import cycle
 from lerobot.datasets.lerobot_dataset import (
@@ -62,9 +64,26 @@ from lerobot.utils.utils import (
 
 @dataclass
 class ERTrainPipelineConfig(TrainPipelineConfig):
+    # GR00T training defaults
+    seed: int | None = 42
+    batch_size: int = 16                    # 16 current + 16 replay = 32 total
+    steps: int = 10_000
+    log_freq: int = 100
+    save_freq: int = 10_000
+    eval_freq: int = 10_000
+    use_policy_training_preset: bool = False
+    optimizer: OptimizerConfig | None = field(
+        default_factory=lambda: AdamWConfig(
+            lr=1e-4, betas=(0.95, 0.999), weight_decay=1e-5, eps=1e-8, grad_clip_norm=1.0
+        )
+    )
+    scheduler: LRSchedulerConfig | None = field(
+        default_factory=lambda: DiffuserSchedulerConfig(name="cosine", num_warmup_steps=500)
+    )
+    # ER-specific
     replay_dataset: DatasetConfig | None = None
     replay_num_workers: int = 16
-    replay_batch_size: int = 8
+    replay_batch_size: int = 16             # matches batch_size above
 
     max_episodes_rendered: int = 100
 

@@ -13,12 +13,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import copy
+"""EWC (Elastic Weight Consolidation) baseline for continual learning.
+
+Each task is trained in a separate script invocation. EWC state (Fisher matrix +
+parameter checkpoint) is persisted to disk between tasks via ewc_state_path /
+ewc_save_path.
+
+Usage:
+    # Task 1 (no prior state):
+    python ewc.py --config <cfg> --ewc_save_path outputs/ewc_state_task1.pt
+
+    # Task 2 (with prior state):
+    python ewc.py --config <cfg> \\
+        --policy.pretrained_path outputs/task1/last_checkpoint \\
+        --ewc_state_path outputs/ewc_state_task1.pt \\
+        --ewc_save_path outputs/ewc_state_task2.pt
+"""
 import logging
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from pathlib import Path
 from pprint import pformat
 from typing import Any
 
@@ -29,14 +43,16 @@ from torch.optim import Optimizer
 
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
-from lerobot.datasets.factory import make_dataset
+from lerobot.optim.optimizers import OptimizerConfig, AdamWConfig
+from lerobot.optim.schedulers import LRSchedulerConfig, DiffuserSchedulerConfig
+from lerobot.datasets.factory import make_dataset, resolve_delta_timestamps, IMAGENET_STATS
 from lerobot.datasets.sampler import EpisodeAwareSampler
 from lerobot.datasets.utils import cycle
+from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+from lerobot.datasets.transforms import ImageTransforms
 from lerobot.envs.factory import make_env, make_env_pre_post_processors
 from lerobot.envs.utils import close_envs
 from lerobot.optim.factory import make_optimizer_and_scheduler
-from lerobot.optim.optimizers import OptimizerConfig, AdamWConfig
-from lerobot.optim.schedulers import LRSchedulerConfig, DiffuserSchedulerConfig
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.rl.wandb_utils import WandBLogger
@@ -56,21 +72,9 @@ from lerobot.utils.utils import (
     init_logging,
 )
 
-from peft import get_peft_model, PeftConfig, PeftType, PeftModel
-
-
-class PeftWrapperPolicy(torch.nn.Module):
-    def __init__(self, policy: PreTrainedPolicy):
-        super().__init__()
-        self._policy = policy
-
-    @property
-    def policy(self):
-        return self._policy
-
 
 @dataclass
-class PEFTTrainPipelineConfig(TrainPipelineConfig):
+class EWCTrainPipelineConfig(TrainPipelineConfig):
     # GR00T training defaults
     seed: int | None = 42
     batch_size: int = 32
@@ -87,15 +91,115 @@ class PEFTTrainPipelineConfig(TrainPipelineConfig):
     scheduler: LRSchedulerConfig | None = field(
         default_factory=lambda: DiffuserSchedulerConfig(name="cosine", num_warmup_steps=500)
     )
-    # LoRA-specific
-    peft_cfg_path: Path | None = None
-    peft_weight_path: Path | None = None
-    merge_back_to_policy: bool = True
-    max_episodes_rendered: int = 4
+    # EWC-specific
+    ewc_lambda: float = 50000.0       # penalty weight (same as LIBERO/GR00T default)
+    ewc_gamma: float = 0.9            # Fisher decay for online EWC across tasks
+    ewc_state_path: str | None = None  # load previous Fisher + checkpoint (.pt)
+    ewc_fisher_batches: int = 200     # batches used to estimate Fisher after training
+    ewc_save_path: str | None = None  # where to save updated EWC state after training
 
-    def __post_init__(self):
-        assert self.peft_cfg_path or self.peft_weight_path, "One from (peft_cfg_path,peft_weight_path) must be specified"
+    max_episodes_rendered: int = 100
 
+
+# ---------------------------------------------------------------------------
+# EWC helper utilities
+# ---------------------------------------------------------------------------
+
+def get_trainable_params(policy: PreTrainedPolicy) -> list[torch.Tensor]:
+    """Return list of parameter tensors that require gradients."""
+    return [p for p in policy.parameters() if p.requires_grad]
+
+
+def flatten_params(params: list[torch.Tensor]) -> torch.Tensor:
+    """Concatenate a list of tensors into a single flat 1-D vector."""
+    return torch.cat([p.reshape(-1) for p in params])
+
+
+def compute_ewc_penalty(
+    policy: PreTrainedPolicy,
+    fish: torch.Tensor,
+    checkpoint: torch.Tensor,
+) -> torch.Tensor:
+    """Diagonal EWC penalty: sum(fish * (theta - theta*)^2)."""
+    current = flatten_params(get_trainable_params(policy))
+    return (fish * (current - checkpoint).pow(2)).sum()
+
+
+def load_ewc_state(path: str, device: torch.device) -> dict:
+    """Load EWC state dict from disk and move tensors to device."""
+    state = torch.load(path, map_location=device, weights_only=True)
+    return state
+
+
+def save_ewc_state(
+    fish: torch.Tensor,
+    checkpoint: torch.Tensor,
+    task_count: int,
+    path: str,
+) -> None:
+    """Save EWC state dict to disk."""
+    torch.save(
+        {"fish": fish.cpu(), "checkpoint": checkpoint.cpu(), "task_count": task_count},
+        path,
+    )
+    logging.info(f"EWC state saved to {path} (task_count={task_count})")
+
+
+def compute_fisher(
+    policy: PreTrainedPolicy,
+    dataloader: torch.utils.data.DataLoader,
+    preprocessor,
+    accelerator: Accelerator,
+    n_batches: int,
+) -> torch.Tensor:
+    """Estimate diagonal Fisher information via squared gradients.
+
+    Runs a forward+backward pass over up to n_batches from dataloader,
+    accumulating grad^2 for each trainable parameter.
+    """
+    unwrapped = accelerator.unwrap_model(policy, keep_fp32_wrapper=True)
+    unwrapped.train()
+
+    trainable_params = get_trainable_params(unwrapped)
+    fish = torch.zeros_like(flatten_params(trainable_params))
+
+    actual_batches = 0
+    for i, batch in enumerate(dataloader):
+        if i >= n_batches:
+            break
+        batch = preprocessor(batch)
+
+        # Zero grads on the unwrapped model directly
+        for p in trainable_params:
+            if p.grad is not None:
+                p.grad.zero_()
+
+        with accelerator.autocast():
+            loss, _ = unwrapped.forward(batch)
+        accelerator.backward(loss)
+
+        grads = [
+            p.grad.detach() if p.grad is not None else torch.zeros_like(p)
+            for p in trainable_params
+        ]
+        fish += flatten_params(grads).pow(2)
+        actual_batches += 1
+
+    if actual_batches > 0:
+        fish /= actual_batches
+
+    # Clean up gradients to avoid interfering with subsequent optimizer steps
+    for p in trainable_params:
+        if p.grad is not None:
+            p.grad.zero_()
+
+    logging.info(f"Fisher estimated over {actual_batches} batches.")
+    return fish
+
+
+# ---------------------------------------------------------------------------
+# Training step
+# ---------------------------------------------------------------------------
 
 def update_policy(
     train_metrics: MetricsTracker,
@@ -104,13 +208,24 @@ def update_policy(
     optimizer: Optimizer,
     grad_clip_norm: float,
     accelerator: Accelerator,
+    fish: torch.Tensor | None,
+    checkpoint: torch.Tensor | None,
+    ewc_lambda: float,
     lr_scheduler=None,
     lock=None,
 ) -> tuple[MetricsTracker, dict]:
     start_time = time.perf_counter()
     policy.train()
+
     with accelerator.autocast():
         loss, output_dict = policy.forward(batch)
+
+    ewc_penalty_value = 0.0
+    if fish is not None and checkpoint is not None:
+        unwrapped = accelerator.unwrap_model(policy, keep_fp32_wrapper=True)
+        ewc_penalty = compute_ewc_penalty(unwrapped, fish, checkpoint)
+        loss = loss + ewc_lambda * ewc_penalty
+        ewc_penalty_value = ewc_penalty.item()
 
     accelerator.backward(loss)
 
@@ -136,11 +251,20 @@ def update_policy(
     train_metrics.grad_norm = grad_norm.item()
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
+
+    if output_dict is None:
+        output_dict = {}
+    output_dict["ewc_penalty"] = ewc_penalty_value
+
     return train_metrics, output_dict
 
 
+# ---------------------------------------------------------------------------
+# Main training entry point
+# ---------------------------------------------------------------------------
+
 @parser.wrap()
-def train(cfg: PEFTTrainPipelineConfig):
+def train(cfg: EWCTrainPipelineConfig):
     cfg.validate()
 
     from accelerate.utils import DistributedDataParallelKwargs
@@ -168,10 +292,29 @@ def train(cfg: PEFTTrainPipelineConfig):
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
 
+    # ------------------------------------------------------------------
+    # Load previous EWC state (if available)
+    # ------------------------------------------------------------------
+    fish = None
+    ewc_checkpoint = None
+    task_count = 0
+
+    if cfg.ewc_state_path is not None:
+        logging.info(f"Loading EWC state from {cfg.ewc_state_path}")
+        ewc_state = load_ewc_state(cfg.ewc_state_path, device)
+        fish = ewc_state["fish"].to(device)
+        ewc_checkpoint = ewc_state["checkpoint"].to(device)
+        task_count = ewc_state["task_count"]
+        logging.info(f"Loaded EWC state: task_count={task_count}, fish.shape={fish.shape}")
+    else:
+        logging.info("No previous EWC state — training task 1 from scratch.")
+
+    # ------------------------------------------------------------------
+    # Dataset, policy, optimizer
+    # ------------------------------------------------------------------
     logging.info("Creating dataset")
     dataset = make_dataset(cfg)
 
-    # Create evaluation environment
     eval_env = None
     env_preprocessor = env_postprocessor = None
     if cfg.eval_freq > 0 and cfg.env is not None:
@@ -217,23 +360,10 @@ def train(cfg: PEFTTrainPipelineConfig):
         **postprocessor_kwargs,
     )
 
-    logging.info("Wrapping policy with peft module")
-    peft_wrapper_policy = PeftWrapperPolicy(policy=policy)
-
-    if cfg.peft_weight_path:
-        peft_policy = PeftModel.from_pretrained(peft_wrapper_policy, cfg.peft_weight_path, is_trainable=True)
-        peft_config = peft_policy.peft_config["default"]
-    else:
-        peft_cfg = PeftConfig.from_pretrained(cfg.peft_cfg_path)
-        peft_cfg.inference_mode = False
-        peft_policy = get_peft_model(peft_wrapper_policy, peft_cfg)
-        peft_config = peft_policy.peft_config["default"]
-
     logging.info("Creating optimizer and scheduler")
     optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
 
     step = 0
-
     if cfg.resume:
         step, optimizer, lr_scheduler = load_training_state(cfg.checkpoint_path, optimizer, lr_scheduler)
 
@@ -248,8 +378,11 @@ def train(cfg: PEFTTrainPipelineConfig):
     logging.info(f"{dataset.num_episodes=}")
     logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
     logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
+    logging.info(f"EWC lambda={cfg.ewc_lambda}, gamma={cfg.ewc_gamma}, fisher_batches={cfg.ewc_fisher_batches}")
 
-    # Create dataloader
+    # ------------------------------------------------------------------
+    # Dataloader
+    # ------------------------------------------------------------------
     if hasattr(cfg.policy, "drop_n_last_frames"):
         shuffle = False
         sampler = EpisodeAwareSampler(
@@ -295,12 +428,16 @@ def train(cfg: PEFTTrainPipelineConfig):
         initial_step=step, accelerator=accelerator,
     )
 
+    # ------------------------------------------------------------------
+    # Training loop
+    # ------------------------------------------------------------------
     logging.info("Start offline training on a fixed dataset")
     for _ in range(step, cfg.steps):
         start_time = time.perf_counter()
         batch = next(dl_iter)
-        batch = preprocessor(batch)
         train_tracker.dataloading_s = time.perf_counter() - start_time
+
+        batch = preprocessor(batch)
 
         train_tracker, output_dict = update_policy(
             train_tracker,
@@ -309,6 +446,9 @@ def train(cfg: PEFTTrainPipelineConfig):
             optimizer,
             cfg.optimizer.grad_clip_norm,
             accelerator=accelerator,
+            fish=fish,
+            checkpoint=ewc_checkpoint,
+            ewc_lambda=cfg.ewc_lambda,
             lr_scheduler=lr_scheduler,
         )
 
@@ -326,34 +466,6 @@ def train(cfg: PEFTTrainPipelineConfig):
                     wandb_log_dict.update(output_dict)
                 wandb_logger.log_dict(wandb_log_dict, step)
             train_tracker.reset_averages()
-
-        if cfg.save_checkpoint and is_saving_step:
-            logging.info(f"Checkpoint policy after step {step}")
-            checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
-
-            unwrapped_policy = accelerator.unwrap_model(policy)
-            peft_policy_copy = copy.deepcopy(peft_policy)
-
-            if peft_policy_copy.peft_type == PeftType.LORA:
-                peft_policy_copy.save_pretrained(str(checkpoint_dir / "adapter"))
-                if cfg.merge_back_to_policy:
-                    peft_wrapper_merged = peft_policy_copy.merge_and_unload()
-                    policy_to_save = peft_wrapper_merged._policy
-                else:
-                    policy_to_save = peft_policy_copy.unload()._policy
-            else:
-                peft_policy_copy.save_pretrained(str(checkpoint_dir / "adapter"))
-                policy_to_save = peft_policy_copy.unload()._policy
-
-            save_checkpoint(
-                checkpoint_dir, step, cfg, policy_to_save, optimizer, lr_scheduler,
-                preprocessor=preprocessor, postprocessor=postprocessor,
-            )
-            update_last_checkpoint(checkpoint_dir)
-            if wandb_logger:
-                wandb_logger.log_policy(checkpoint_dir)
-
-            del peft_policy_copy
 
         if cfg.env and eval_env and is_eval_step:
             step_id = get_step_identifier(step, cfg.steps)
@@ -391,7 +503,67 @@ def train(cfg: PEFTTrainPipelineConfig):
                 wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
                 wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
                 if eval_info.get("overall", {}).get("video_paths"):
-                    wandb_logger.log_video(eval_info["overall"]["video_paths"][0], step, mode="eval")
+                    wandb_logger.log_video(eval_info["overall"]["video_paths"][-1], step, mode="eval")
+
+        if cfg.save_checkpoint and is_saving_step:
+            logging.info(f"Checkpoint policy after step {step}")
+            checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
+            save_checkpoint(
+                checkpoint_dir, step, cfg, accelerator.unwrap_model(policy), optimizer, lr_scheduler,
+                preprocessor=preprocessor, postprocessor=postprocessor,
+            )
+            update_last_checkpoint(checkpoint_dir)
+            if wandb_logger:
+                wandb_logger.log_policy(checkpoint_dir)
+
+    # ------------------------------------------------------------------
+    # Post-training: compute Fisher + accumulate + save EWC state
+    # ------------------------------------------------------------------
+    if cfg.ewc_save_path is not None:
+        logging.info("Computing Fisher information matrix on current task data...")
+
+        # Build a fresh (non-cycled) dataloader for Fisher estimation
+        fisher_dataloader = torch.utils.data.DataLoader(
+            dataset,
+            num_workers=cfg.num_workers,
+            batch_size=cfg.batch_size,
+            shuffle=True,
+            sampler=None,
+            pin_memory=device.type == "cuda",
+            drop_last=False,
+            prefetch_factor=2 if cfg.num_workers > 0 else None,
+        )
+        fisher_dataloader = accelerator.prepare(fisher_dataloader)
+
+        new_fish = compute_fisher(
+            policy,
+            fisher_dataloader,
+            preprocessor,
+            accelerator,
+            cfg.ewc_fisher_batches,
+        )
+
+        # Online EWC: accumulate with gamma decay
+        if fish is not None:
+            accumulated_fish = cfg.ewc_gamma * fish + new_fish
+            logging.info(f"Accumulated Fisher with gamma={cfg.ewc_gamma}")
+        else:
+            accumulated_fish = new_fish
+
+        # Capture parameter checkpoint
+        unwrapped = accelerator.unwrap_model(policy, keep_fp32_wrapper=True)
+        new_checkpoint = flatten_params(get_trainable_params(unwrapped)).detach()
+
+        save_ewc_state(
+            accumulated_fish,
+            new_checkpoint,
+            task_count + 1,
+            cfg.ewc_save_path,
+        )
+    else:
+        logging.info(
+            "ewc_save_path not set — skipping Fisher computation and EWC state save."
+        )
 
     if eval_env:
         close_envs(eval_env)
