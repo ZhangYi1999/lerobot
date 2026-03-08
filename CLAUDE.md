@@ -61,7 +61,7 @@ All 5 CLARE config classes now override LeRobot generic defaults with GR00T N1.5
 
 | File | Purpose |
 |------|---------|
-| `docker/Dockerfile.clare` | Training image: `runpod/pytorch` base + Python 3.12 + lerobot[libero,peft] + peft_lsy. Code mounted at runtime. |
+| `docker/Dockerfile.clare` | Training image: `runpod/pytorch` base + Python 3.12 + lerobot[all] + peft_lsy. Code mounted at runtime. |
 | `src/lerobot/scripts/clare/docker_api/main.py` | FastAPI inside container: POST/GET/DELETE `/jobs` for training management |
 | `src/lerobot/scripts/clare/docker_api/job_manager.py` | tmux-based job lifecycle (start/monitor/cancel), JSON state persistence |
 | `src/lerobot/scripts/lerobot_pod_manager.py` | CLI: `create`/`wait`/`submit`/`logs`/`list`/`terminate` RunPod pods via REST API |
@@ -69,10 +69,21 @@ All 5 CLARE config classes now override LeRobot generic defaults with GR00T N1.5
 
 **Entry point added:** `lerobot-pod-manager` in `pyproject.toml`
 
+### 5. Docker Image Build & Verification (2026-03-08)
+
+Built and verified `ghcr.io/zhangyi1999/clare-training:latest`:
+
+- **Base image confirmed**: `runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04`
+- **Fixed**: `apt_pkg` symlink broken in RunPod base image → copied `.so` before `add-apt-repository`
+- **Fixed**: `peft_lsy/src/peft/peft_model.py` — `HybridCache` removed in `transformers 5.x`, wrapped import in `try/except`
+- **Changed**: lerobot install extras from `[libero,peft]` → `[all]`
+- **Verified**: all imports pass (lerobot 0.4.5, peft 0.17.1.dev0, libero, 4 CLARE scripts, docker_api)
+- **Verified**: FastAPI starts and responds on port 8000
+- **Image pushed**: `ghcr.io/zhangyi1999/clare-training:latest` (push in progress / completed)
+- **Local export**: `C:\Users\Yi\Documents\clare-training.tar.gz` (15GB)
+
 ## Not Yet Done
 
-- [ ] Docker image not yet built or pushed (need to verify `runpod/pytorch` tag availability and build)
-- [ ] Import checks on migrated scripts not yet run (need Docker or Linux env for Libero)
 - [ ] End-to-end RunPod training test not yet performed
 - [ ] `RUNPOD_API_KEY` not configured
 - [ ] `.dockerignore` is at workspace root (`XLerobot_workspace/.dockerignore`), not in this repo
