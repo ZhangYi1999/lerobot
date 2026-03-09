@@ -79,12 +79,44 @@ Built and verified `ghcr.io/zhangyi1999/clare-training:latest`:
 - **Changed**: lerobot install extras from `[libero,peft]` → `[all]`
 - **Verified**: all imports pass (lerobot 0.4.5, peft 0.17.1.dev0, libero, 4 CLARE scripts, docker_api)
 - **Verified**: FastAPI starts and responds on port 8000
-- **Image pushed**: `ghcr.io/zhangyi1999/clare-training:latest` (push in progress / completed)
+- **Image pushed**: `ghcr.io/zhangyi1999/clare-training:latest` (confirmed on 2026-03-09; digest: `sha256:e817aee893f64ace5f06e1deb07d26c371d19ce6a399958f14ebd1a15b376169`)
 - **Local export**: `C:\Users\Yi\Documents\clare-training.tar.gz` (15GB)
+
+### 6. Continual Learning Experiment Scripts (2026-03-09)
+
+**Dataset verification**: `lerobot/libero_10_subtask` — 500 eps, 10 tasks, 50 eps/task. Confirmed **task i = episodes [i*50 .. i*50+49]** in Docker.
+
+**Bash scripts** created in `lerobot/bash_scripts/`:
+
+| File | Purpose |
+|------|---------|
+| `common.sh` | Shared config: episode-task mapping, training defaults, WandB, helper functions |
+| `verify_dataset.py` | Downloads dataset, verifies episode→task mapping |
+| `run_clare.sh` | CLARE: adapter phase → discriminator phase per task |
+| `run_er.sh` | ER: current task + replay buffer from all previous tasks |
+| `run_packnet.sh` | PackNet: train → prune 75% → post-prune fine-tune |
+| `run_lora.sh` | SeqLoRA: LoRA → train → merge into backbone |
+| `run_ewc.sh` | EWC: train with Fisher penalty → compute/accumulate Fisher |
+
+**PEFT config files** created in `lerobot/configs/peft/`:
+
+| File | Details |
+|------|---------|
+| `clare/adapter_config.json` | DiT ff (1536) + VL Self-Attn ff (2048), LoRA rank=32 + Autoencoder discriminator |
+| `lora/adapter_config.json` | DiT + VL attention (to_q/k/v/out), LoRA rank=32, alpha=64 |
+
+GR00T N1.5 model dimensions: DiT inner_dim = 32×48 = **1536**, VL self-attn = 32×64 = **2048**.
+
+**Bug fixes**:
+- `clare.py`: `phase: Literal[...]` → `str` (draccus CLI parser doesn't support `Literal` decoding)
+- `clare.py`: `at_least_expand: Literal[...]` → `str` (same issue)
+- `common.sh`: `BASE_MODEL` corrected from non-existent `lerobot/gr00t-1.5b` to `nvidia/GR00T-N1.5-3B`
+
+**RunPod skill** installed: copied `lerobot/.claude/skills/runpod/SKILL.md` → project root `.claude/skills/runpod/SKILL.md`
 
 ## Not Yet Done
 
-- [ ] End-to-end RunPod training test not yet performed
+- [ ] End-to-end training test (blocked locally by CUDA 12.8 vs host driver 550.78 mismatch; needs RunPod or Dockerfile fix)
 - [ ] `RUNPOD_API_KEY` not configured
 - [ ] `.dockerignore` is at workspace root (`XLerobot_workspace/.dockerignore`), not in this repo
 
@@ -95,3 +127,6 @@ Built and verified `ghcr.io/zhangyi1999/clare-training:latest`:
 - **RunPod pytorch images** only go up to Python 3.11. Dockerfile.clare adds Python 3.12 via deadsnakes PPA.
 - **Editable install + mount overlay**: Dockerfile does `pip install -e`, runtime mounts `src/` over the same path. The `.pth` file still works → code changes take effect without rebuild.
 - **peft_lsy overrides official peft**: installed after lerobot to replace the official `peft` package.
+- **Base model is `nvidia/GR00T-N1.5-3B`** (gated, needs HF token). `lerobot/gr00t-1.5b` does NOT exist.
+- **Checkpoint structure**: `{output_dir}/checkpoints/last/` (symlink) → `adapter/` (PEFT weights) + `pretrained_model/` (base policy). PackNet adds `pretrained_model/mask.safetensors`. EWC saves Fisher state separately as `ewc_state_task{N}.pt`.
+- **Docker CUDA 12.8 incompatible with local RTX 4090** (driver 550.78 supports up to ~CUDA 12.4). Need CUDA 12.4 base image or test on RunPod A100.

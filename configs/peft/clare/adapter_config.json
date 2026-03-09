@@ -1,0 +1,51 @@
+{
+    "peft_type": "CLARE",
+    "target_modules": [
+        {
+            "pattern": "action_head\\.model\\.transformer_blocks\\.(?P<layer_id>\\d+)\\.ff",
+            "feature_dim": 1536,
+            "out_feature_dim": 1536,
+            "batch_first": true,
+            "use_trainable_copy": false,
+            "add_zero_init_conv_layer": false,
+            "discriminator_cfg": {
+                "type": "autoencoder",
+                "feature_dim": 1536,
+                "batch_first": true,
+                "max_batches_tracked": 2000,
+                "use_momentum": true,
+                "momentum": 0.1
+            },
+            "func_adapter_cfg": {
+                "hidden_dim": 0,
+                "use_lora": true,
+                "lora_rank": 32,
+                "lora_alpha": 32
+            }
+        },
+        {
+            "pattern": "action_head\\.vl_self_attention\\.transformer_blocks\\.(?P<layer_id>\\d+)\\.ff",
+            "feature_dim": 2048,
+            "out_feature_dim": 2048,
+            "batch_first": true,
+            "use_trainable_copy": false,
+            "add_zero_init_conv_layer": false,
+            "discriminator_cfg": {
+                "type": "autoencoder",
+                "feature_dim": 2048,
+                "batch_first": true,
+                "max_batches_tracked": 2000,
+                "use_momentum": true,
+                "momentum": 0.1
+            },
+            "func_adapter_cfg": {
+                "hidden_dim": 0,
+                "use_lora": true,
+                "lora_rank": 32,
+                "lora_alpha": 32
+            }
+        }
+    ],
+    "num_learned_task": 0,
+    "structure": {}
+}

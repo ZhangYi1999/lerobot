@@ -93,7 +93,7 @@ class PEFTTrainPipelineConfig(TrainPipelineConfig):
     peft_weight_path: Path | None = None
 
     # Phase control: "full" (original), "adapter" (Phase 1), "discriminator" (Phase 2)
-    phase: Literal["full", "adapter", "discriminator"] = "full"
+    phase: str = "full"
     # For discriminator phase: path to adapter checkpoint from Phase 1
     adapter_checkpoint_path: Path | None = None
 
@@ -121,13 +121,14 @@ class PEFTTrainPipelineConfig(TrainPipelineConfig):
 
     maximum_expand: int = 10000
     expand_threshold: float = 0.0
-    at_least_expand: Literal["shallowest", "deepest"] = field(
+    at_least_expand: str = field(
         default="shallowest", metadata={"help": "At least expand which layer. Can be 'shallowest' or 'deepest'"}
     )
 
     max_episodes_rendered: int = 4
 
     def __post_init__(self):
+        assert self.phase in ("full", "adapter", "discriminator"), f"phase must be full/adapter/discriminator, got {self.phase}"
         assert self.peft_cfg_path or self.peft_weight_path, "One from (peft_cfg_path,peft_weight_path) must be specified"
 
 

@@ -1,0 +1,21 @@
+{
+    "peft_type": "LORA",
+    "r": 32,
+    "lora_alpha": 64,
+    "lora_dropout": 0.0,
+    "bias": "none",
+    "task_type": null,
+    "target_modules": [
+        "action_head.model.transformer_blocks.*.attn1.to_q",
+        "action_head.model.transformer_blocks.*.attn1.to_k",
+        "action_head.model.transformer_blocks.*.attn1.to_v",
+        "action_head.model.transformer_blocks.*.attn1.to_out.0",
+        "action_head.model.proj_out_1",
+        "action_head.model.proj_out_2",
+        "action_head.vl_self_attention.transformer_blocks.*.attn1.to_q",
+        "action_head.vl_self_attention.transformer_blocks.*.attn1.to_k",
+        "action_head.vl_self_attention.transformer_blocks.*.attn1.to_v",
+        "action_head.vl_self_attention.transformer_blocks.*.attn1.to_out.0"
+    ],
+    "modules_to_save": null
+}
