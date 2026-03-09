@@ -3,20 +3,17 @@
 # Build (from workspace root):
 #   docker build -f lerobot/docker/Dockerfile.clare -t clare-training:latest .
 #
-# Run locally:
+# Run locally (persistent storage via /runpod-volume mount):
 #   docker run --gpus all -it -p 8000:8000 \
 #     -v $(pwd)/lerobot/src:/app/lerobot/src \
 #     -v $(pwd)/peft_lsy/src:/app/peft_lsy/src \
-#     clare-training:latest
-#
-# Run with shell (debugging):
-#   docker run --gpus all -it -p 8000:8000 \
-#     -v $(pwd)/lerobot/src:/app/lerobot/src \
-#     -v $(pwd)/peft_lsy/src:/app/peft_lsy/src \
+#     -v $(pwd)/data:/runpod-volume \
 #     clare-training:latest /bin/bash
+#
+# On RunPod, /runpod-volume is auto-mounted from network volume.
 
-# RunPod base with CUDA 12.8 + cuDNN (Python 3.11, we add 3.12 below)
-FROM runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
+# RunPod base with CUDA 12.4 (compatible with driver ≥550: RTX 4090, A100, H100)
+FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
 # System dependencies for Libero / MuJoCo / tmux
 # Fix apt_pkg: RunPod image breaks the Python→apt_pkg symlink
@@ -55,11 +52,11 @@ RUN cd peft_lsy && uv pip install --no-cache -e .
 # FastAPI dependencies for docker_api
 RUN uv pip install --no-cache fastapi uvicorn python-multipart
 
-# Mount points for data and outputs
-RUN mkdir -p /data /output /app/jobs
+# Persistent storage: /runpod-volume (auto-mounted on RunPod, -v mount locally)
+RUN mkdir -p /runpod-volume /app/jobs
 
-ENV HF_HOME=/app/.cache/huggingface \
-    TORCH_HOME=/app/.cache/torch
+ENV HF_HOME=/runpod-volume/huggingface \
+    TORCH_HOME=/runpod-volume/torch
 
 EXPOSE 8000
 

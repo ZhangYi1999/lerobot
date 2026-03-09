@@ -27,8 +27,7 @@ class TrainingJobParams(BaseModel):
     dataset_repo_id: str
 
     # Paths
-    dataset_root: str = "/data"
-    output_dir: str = "/output/run"
+    output_dir: str = "/runpod-volume/outputs/run"
 
     # Training
     batch_size: int = 64

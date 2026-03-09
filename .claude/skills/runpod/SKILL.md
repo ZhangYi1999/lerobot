@@ -44,7 +44,7 @@ python -m lerobot.scripts.lerobot_pod_manager submit <pod_id> \
   --phase adapter \
   --policy-path <policy_path> \
   --dataset-repo-id <dataset_repo_id> \
-  --output-dir /output/<run_name> \
+  --output-dir /runpod-volume/outputs/<run_name> \
   --steps 20000
 ```
 
@@ -52,7 +52,7 @@ Available scripts: `clare`, `er`, `packnet`, `lora`
 
 CLARE phases: `full`, `adapter`, `discriminator`
 
-For discriminator phase, add: `--adapter-checkpoint-path /output/<adapter_run>/checkpoint`
+For discriminator phase, add: `--adapter-checkpoint-path /runpod-volume/outputs/<adapter_run>/checkpoint`
 
 ### Step 4: Monitor Progress
 
@@ -104,16 +104,17 @@ docker push ghcr.io/<user>/clare-training:latest
 
 ## Local Debugging
 
-Same image, mount code for live edits:
+Same image, mount code for live edits. All persistent data goes to `/runpod-volume`:
 
 ```bash
 docker run --gpus all -it --rm -p 8000:8000 \
   -v $(pwd)/lerobot/src:/app/lerobot/src \
   -v $(pwd)/peft_lsy/src:/app/peft_lsy/src \
-  -v /path/to/data:/data \
-  -v /path/to/output:/output \
+  -v $(pwd)/data:/runpod-volume \
   clare-training:latest /bin/bash
 ```
+
+On RunPod, `/runpod-volume` is auto-mounted from the network volume — no extra config needed.
 
 Then manually run: `python -m lerobot.scripts.clare.clare --policy.path=... --dataset.repo_id=...`
 

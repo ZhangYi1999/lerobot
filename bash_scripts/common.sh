@@ -60,7 +60,7 @@ EVAL_N_EPISODES=10
 NUM_WORKERS=16
 
 # ─── Output ─────────────────────────────────────────────────────────────────────
-OUTPUT_BASE="outputs"
+OUTPUT_BASE="/runpod-volume/outputs"
 
 # ─── WandB ──────────────────────────────────────────────────────────────────────
 WANDB_ENABLED=${WANDB_ENABLED:-true}
