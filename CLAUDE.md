@@ -1,5 +1,9 @@
 # LeRobot (CLARE Fork) — Work Log
 
+## Rules
+
+- Update this CLAUDE.md when finished new plan or features.
+
 ## Project Overview
 
 This is a fork of HuggingFace LeRobot on the `clare` branch, used for the CLARE (Continual Learning with Adapters) paper. The fork adds custom continual learning training scripts and RunPod training infrastructure.
