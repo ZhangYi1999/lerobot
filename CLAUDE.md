@@ -118,11 +118,76 @@ GR00T N1.5 model dimensions: DiT inner_dim = 32×48 = **1536**, VL self-attn = 3
 
 **RunPod skill** installed: copied `lerobot/.claude/skills/runpod/SKILL.md` → project root `.claude/skills/runpod/SKILL.md`
 
+### 7. Fix Base Model Loading for Task 0 (2026-03-10)
+
+**Problem**: All bash scripts used `--policy.path=nvidia/GR00T-N1.5-3B` for task 0, which fails because `validate()` calls `PreTrainedConfig.from_pretrained()` on nvidia's raw `config.json` (lacks `type` key, incompatible fields).
+
+**Fix**: Per the official GR00T tutorial, base models use `--policy.type=groot --policy.push_to_hub=false` (not `--policy.path`). The `--policy.path` pattern is for LeRobot-saved checkpoints (subsequent tasks).
+
+**Changes**:
+- `common.sh`: Added `get_policy_args()` helper, removed `BASE_MODEL` variable
+- All 5 method scripts (`run_clare.sh`, `run_er.sh`, `run_packnet.sh`, `run_lora.sh`, `run_ewc.sh`): Use `get_policy_args()` — task 0 gets `--policy.type=groot`, subsequent tasks get `--policy.path=<checkpoint>`
+- `run_local_e2e.sh`: Replaced `--policy.path=${BASE_MODEL}` with `--policy.type=groot --policy.push_to_hub=false`
+
+**Verified**: Docker test confirms policy config loads correctly (`type: groot`, `push_to_hub: False`).
+
+### 8. Docker CLARE Training End-to-End Fixes (2026-03-10)
+
+**Goal**: Get `python -m lerobot.scripts.clare.clare --phase=adapter` running in Docker with all source-mounted.
+
+**Fixes applied** (in order of discovery):
+
+| # | Error | File | Fix |
+|---|-------|------|-----|
+| 1 | `KeyError: 'observation.images.image'` in dataset stats | `lerobot/src/.../datasets/factory.py` | Initialize `stats[key] = {}` if missing before setting imagenet stats |
+| 2 | `EOFError` from libero interactive prompt | Docker command | Pre-create `~/.libero/config.yaml` in bash before Python |
+| 3 | `ImportError: FlashAttention2 toggled on but not available` | `eagle2_hg_model/configuration_eagle2_5_vl.py`, `modeling_eagle2_5_vl.py` | Auto-detect flash_attn, fall back to SDPA; downgrade config BEFORE `super().__init__()` |
+| 4 | `RuntimeError: .item() on meta tensors` in Beta distribution | `groot/action_head/flow_matching_action_head.py` | Lazy-init Beta distribution on first `sample_time()` call |
+| 5 | `AttributeError: 'GR00TN15' has no 'all_tied_weights_keys'` | `groot/groot_n1.py` | Added `_tied_weights_keys = {}` + `self.post_init()` |
+| 6 | `ValueError: Can't find adapter_config.json` (relative path) | Docker mount | Mount `lerobot/configs` → `/app/configs`, use absolute path |
+| 7 | `ValueError: Target modules not found` | `configs/peft/clare/adapter_config.json`, `lora/adapter_config.json` | Add `policy._groot_model.` prefix to all target patterns (PeftWrapperPolicy wrapping) |
+| 8 | `TypeError: empty() got dtype=NoneType` in discriminator | `configs/peft/clare/adapter_config.json` | Add `hidden_dim: 256` to both discriminator_cfg blocks |
+| 9 | `AttributeError: 'list' has no attribute 'shape'` on pixel_values | `eagle2_hg_model/processing_eagle2_5_vl.py` | Convert list/nested-list pixel_values & image_sizes to tensors (transformers 5.x compat) |
+
+**Docker test command** (working):
+```bash
+docker run --gpus all --rm \
+  -v $(pwd)/lerobot/src:/app/lerobot/src \
+  -v $(pwd)/lerobot/configs:/app/configs \
+  -v $(pwd)/peft_lsy/src:/app/peft_lsy/src \
+  -v $(pwd)/data:/runpod-volume \
+  -v $HOME/.cache/huggingface:/runpod-volume/huggingface \
+  ghcr.io/zhangyi1999/clare-training:latest \
+  bash -c 'mkdir -p ~/.libero && cat > ~/.libero/config.yaml << EOF
+benchmark_root: /app/.venv/lib/python3.12/site-packages/libero/libero
+bddl_files: /app/.venv/lib/python3.12/site-packages/libero/libero/./bddl_files
+init_states: /app/.venv/lib/python3.12/site-packages/libero/libero/./init_files
+datasets: /app/.venv/lib/python3.12/site-packages/libero/libero/../datasets
+assets: /app/.venv/lib/python3.12/site-packages/libero/libero/./assets
+EOF
+python -m lerobot.scripts.clare.clare \
+  --phase=adapter --policy.type=groot --policy.push_to_hub=false \
+  --peft_cfg_path=/app/configs/peft/clare \
+  --dataset.repo_id=lerobot/libero_10_subtask --dataset.episodes="[0,1,2,3,4]" \
+  --env.type=libero --env.task=libero_10 --env.task_ids="[0]" \
+  --seed=42 --batch_size=4 --steps=10 \
+  --eval_freq=0 --save_freq=10 --log_freq=1 \
+  --output_dir=/runpod-volume/outputs/test_clare --wandb.enable=false'
+```
+
+**IMPORTANT**: Delete stale transformers modules cache before each run (root-owned files from Docker):
+```bash
+docker run --rm -v $HOME/.cache/huggingface:/cache ghcr.io/zhangyi1999/clare-training:latest \
+  rm -rf /cache/modules/transformers_modules/eagle2hg_hyphen_processor_hyphen_groot_hyphen_n1p5
+```
+
+**Verified**: 10 training steps completed, loss 0.932→0.772, ~88ms/step, checkpoint saved.
+
 ## Not Yet Done
 
-- [ ] End-to-end training test (blocked locally by CUDA 12.8 vs host driver 550.78 mismatch; needs RunPod or Dockerfile fix)
 - [ ] `RUNPOD_API_KEY` not configured
 - [ ] `.dockerignore` is at workspace root (`XLerobot_workspace/.dockerignore`), not in this repo
+- [ ] Stale transformers modules cache requires manual deletion before each Docker run (fix: update `ensure_eagle_cache_ready` to also clear the transformers dynamic modules cache)
 
 ## Key Technical Notes
 
