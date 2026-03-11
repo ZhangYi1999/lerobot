@@ -48,8 +48,10 @@ from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_STR
 from lerobot.utils.utils import SuppressProgressBars, is_valid_numpy_dtype_string
 
 DEFAULT_CHUNK_SIZE = 1000  # Max number of files per chunk
-DEFAULT_DATA_FILE_SIZE_IN_MB = 100  # Max size per file
-DEFAULT_VIDEO_FILE_SIZE_IN_MB = 200  # Max size per file
+# DEFAULT_DATA_FILE_SIZE_IN_MB = 100  # Max size per file
+# DEFAULT_VIDEO_FILE_SIZE_IN_MB = 200  # Max size per file
+DEFAULT_DATA_FILE_SIZE_IN_MB = 0  # Seperate different episodes into different files
+DEFAULT_VIDEO_FILE_SIZE_IN_MB = 0  # Seperate different episodes into different files
 
 INFO_PATH = "meta/info.json"
 STATS_PATH = "meta/stats.json"
