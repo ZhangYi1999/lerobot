@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+STEPS=40000
+SAVE_FREQ=40000
+
 DATASETS=(
     "real_0_put_bowl_filtered"
     "real_1_stack_bowls_filtered"
@@ -29,9 +32,9 @@ for DATASET in "${DATASETS[@]}"; do
         --policy.repo_id="continuallearning/diffusion_fft_${DATASET}" \
         --batch_size=64 \
         --num_workers=16 \
-        --steps=40000 \
+        --steps=${STEPS} \
         --eval_freq=0 \
-        --save_freq=40000 \
+        --save_freq=${SAVE_FREQ} \
         --log_freq=100 \
         --wandb.enable=true \
         --wandb.disable_artifact=true \
