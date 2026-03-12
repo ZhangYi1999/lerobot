@@ -3,8 +3,8 @@ set -e
 
 BATCH_SIZE=8
 NUM_WORKERS=8
-STEPS=200
-SAVE_FREQ=200
+STEPS=10000
+SAVE_FREQ=10000
 
 DATASETS=(
     "real_0_put_bowl_filtered"
