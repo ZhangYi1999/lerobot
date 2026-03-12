@@ -20,7 +20,8 @@ for DATASET in "${DATASETS[@]}"; do
     echo "Converting: continuallearning/${DATASET}"
     echo "=========================================="
     python -m lerobot.datasets.v30.convert_dataset_v21_to_v30 \
-        --repo-id="continuallearning/${DATASET}" || {
+        --repo-id="continuallearning/${DATASET}" \
+        --push-to-hub=true || {
         echo "SKIPPED: continuallearning/${DATASET} (not found or invalid)"
         continue
     }
