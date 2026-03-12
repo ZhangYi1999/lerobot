@@ -222,6 +222,11 @@ class Eagle25VLProcessor(ProcessorMixin):
                         videos=None,
                         **output_kwargs["images_kwargs"],
                     )
+                    # transformers 5.x returns list[list[Tensor]] for pixel_values and list[tuple] for image_sizes
+                    if "pixel_values" in image_inputs and isinstance(image_inputs["pixel_values"], list):
+                        image_inputs["pixel_values"] = torch.stack([t for sublist in image_inputs["pixel_values"] for t in sublist])
+                    if "image_sizes" in image_inputs and isinstance(image_inputs["image_sizes"], list):
+                        image_inputs["image_sizes"] = torch.tensor(image_inputs["image_sizes"])
                     num_all_tiles = image_inputs["pixel_values"].shape[0]
                     special_placeholder = f"<image {idx_in_list + 1}>{self.image_start_token}{self.image_token * num_all_tiles * self.tokens_per_tile}{self.image_end_token}"
                     unified_frame_list.append(image_inputs)
@@ -233,6 +238,10 @@ class Eagle25VLProcessor(ProcessorMixin):
                         videos=[video_list[idx_in_list]],
                         **output_kwargs["videos_kwargs"],
                     )
+                    if "pixel_values" in video_inputs and isinstance(video_inputs["pixel_values"], list):
+                        video_inputs["pixel_values"] = torch.stack([t for sublist in video_inputs["pixel_values"] for t in sublist])
+                    if "image_sizes" in video_inputs and isinstance(video_inputs["image_sizes"], list):
+                        video_inputs["image_sizes"] = torch.tensor(video_inputs["image_sizes"])
                     num_all_tiles = video_inputs["pixel_values"].shape[0]
                     image_sizes = video_inputs["image_sizes"]
                     if timestamps_list is not None and -1 not in timestamps_list:

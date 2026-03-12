@@ -195,6 +195,7 @@ class GR00TN15Config(PretrainedConfig):
 class GR00TN15(PreTrainedModel):
     supports_gradient_checkpointing = True
     config_class = GR00TN15Config
+    _tied_weights_keys = {}
     """
     we expect the backbone output to have a key 'backbone_features' with shape (batch_size, n, hidden_size)
     here n is variable and can be e.g. time, 1 or user specified
@@ -220,6 +221,8 @@ class GR00TN15(PreTrainedModel):
         self.action_horizon = config.action_horizon
         self.action_dim = config.action_dim
         self.compute_dtype = config.compute_dtype
+
+        self.post_init()
 
     def validate_inputs(self, inputs):
         # NOTE -- this should be handled internally by the model
