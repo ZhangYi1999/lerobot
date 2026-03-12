@@ -5,6 +5,7 @@ BATCH_SIZE=8
 NUM_WORKERS=8
 STEPS=10000
 SAVE_FREQ=10000
+LOG_FREQ=100
 
 DATASETS=(
     "real_0_put_bowl_filtered"
@@ -37,7 +38,7 @@ for DATASET in "${DATASETS[@]}"; do
         --steps=${STEPS} \
         --eval_freq=0 \
         --save_freq=${SAVE_FREQ} \
-        --log_freq=1 \
+        --log_freq=${LOG_FREQ} \
         --wandb.enable=true \
         --wandb.disable_artifact=true \
         --wandb.project=clare_rebuttal \

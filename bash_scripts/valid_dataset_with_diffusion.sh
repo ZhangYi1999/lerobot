@@ -5,9 +5,9 @@ STEPS=30000
 SAVE_FREQ=30000
 
 DATASETS=(
-    "real_0_put_bowl_filtered"
-    "real_1_stack_bowls_filtered"
-    "real_0_put_bowl"
+    # "real_0_put_bowl_filtered"
+    # "real_1_stack_bowls_filtered"
+    # "real_0_put_bowl"
     "real_1_stack_bowls"
     # "real_2_put_moka_pot"
     # "real_2_put_moka_pot_filtered"
