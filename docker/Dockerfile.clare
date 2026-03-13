@@ -7,13 +7,13 @@
 #   Local:  bash lerobot/bash_scripts/docker_finetune_groot.sh
 #   RunPod: bash /runpod-volume/lerobot/bash_scripts/runpod_finetune_groot.sh
 
-# RunPod base with CUDA 12.4 + Python 3.11 (compatible with driver ≥550)
-FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+# PyTorch 2.8.0 stable + CUDA 12.8 + Python 3.11
+FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel
 
 # System dependencies for Libero / MuJoCo / tmux
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tmux ffmpeg \
-    libglib2.0-0 libgl1-mesa-glx libegl1-mesa \
+    libglib2.0-0 libgl1-mesa-glx libegl1-mesa libegl-dev libgl-dev libglew-dev \
     libusb-1.0-0-dev libgeos-dev \
     cmake pkg-config ninja-build \
     && rm -rf /var/lib/apt/lists/*
@@ -26,11 +26,19 @@ RUN pip install --no-cache-dir uv
 
 # Install lerobot with policy + sim extras (editable for mount overlay)
 COPY lerobot/ ./lerobot/
-RUN cd lerobot && uv pip install --no-cache -e ".[groot,smolvla,pi,xvla,libero]"
+RUN uv pip install --no-cache --system https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.16/flash_attn-2.8.3%2Bcu128torch2.8-cp311-cp311-linux_x86_64.whl
+RUN cd lerobot && uv pip install --no-cache --system -e ".[groot,smolvla,xvla]"
+RUN uv pip install --no-cache --system hf-libero --no-deps && \
+    uv pip install --no-cache --system robomimic --no-deps
 
 # Install peft_lsy (overrides official peft, editable for mount overlay)
 COPY peft_lsy/ ./peft_lsy/
-RUN cd peft_lsy && uv pip install --no-cache -e .
+RUN cd peft_lsy && uv pip install --no-cache --system -e .
+
+# Clear source code, keep empty dirs as mount points (editable .egg-link remains in site-packages)
+RUN rm -rf /app/lerobot /app/peft_lsy
+RUN mkdir -p /app/lerobot
+RUN mkdir -p /app/peft_lsy
 
 # Persistent storage: /runpod-volume (auto-mounted on RunPod, -v mount locally)
 RUN mkdir -p /runpod-volume
