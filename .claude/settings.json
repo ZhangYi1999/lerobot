@@ -6,7 +6,10 @@
       "Bash(git log:*)",
       "Bash(git checkout:*)",
       "Bash(git add:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(screen -S build_docker -X quit)",
+      "Bash(curl -s \"https://hub.docker.com/v2/repositories/runpod/pytorch/tags?page_size=100&name=py3.11\")",
+      "Bash(python3 -c \"import sys,json; data=json.load\\(sys.stdin\\); [print\\(r[''''name'''']\\) for r in data.get\\(''''results'''',[]\\)]\")"
     ]
   }
 }
