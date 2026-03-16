@@ -368,7 +368,7 @@ class GR00TN15(PreTrainedModel):
             )
             local_model_path = pretrained_model_name_or_path
 
-        pretrained_model = super().from_pretrained(
+        pretrained_model = super(GR00TN15, cls).from_pretrained(
             local_model_path, local_model_path=local_model_path, **kwargs
         )
 
