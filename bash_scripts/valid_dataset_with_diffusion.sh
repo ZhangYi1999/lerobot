@@ -8,15 +8,19 @@ DATASETS=(
     # "real_0_put_bowl_filtered"
     # "real_1_stack_bowls_filtered"
     # "real_0_put_bowl"
-    "real_1_stack_bowls"
-    # "real_2_put_moka_pot"
+    # "real_1_stack_bowls"
     # "real_2_put_moka_pot_filtered"
-    # "real_3_close_drawer"
     # "real_3_close_drawer_filtered"
+    # "real_3_close_drawer"
+    # "real_2_put_moka_pot"
     # "real_4_put_lego_into_drawer"
     # "real_4_put_lego_into_drawer_filtered"
     # "real_5_stack_lego"
     # "real_5_stack_lego_filtered"
+    "real_2_put_moka_pot_filtered_fixed"
+    "real_3_close_drawer_filtered_fixed"
+    "real_3_close_drawer_fixed"
+    "real_2_put_moka_pot_fixed"
 )
 
 for DATASET in "${DATASETS[@]}"; do
