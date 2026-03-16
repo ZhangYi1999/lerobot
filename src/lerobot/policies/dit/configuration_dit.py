@@ -112,18 +112,36 @@ class DiTConfig(PreTrainedConfig):
     # Diffusion Transformer (DiT) parameters.
     frequency_embedding_dim: int = 256
     hidden_dim: int = 512
-    num_blocks: int = 8
+    num_blocks: int = 6
     num_heads: int = 16
     dropout: float = 0.1
     dim_feedforward: int = 4096
     activation: str = "gelu"
 
-    # Noise scheduler.
+    # Noise type: "flow_matching" or "ddim"
+    noise_type: str = "flow_matching"
+
+    # Flow matching noise scheduler.
     training_noise_sampling: str = (
         "uniform"  # "uniform" or "beta", from pi0 https://www.physicalintelligence.company/download/pi0.pdf
     )
+
+    # DDIM-specific params (only used when noise_type="ddim")
+    num_train_timesteps: int = 100
+    beta_schedule: str = "squaredcos_cap_v2"
+    beta_start: float = 0.0001
+    beta_end: float = 0.02
+    prediction_type: str = "epsilon"  # "epsilon" or "sample"
+    set_alpha_to_one: bool = True
+    steps_offset: int = 0
+
+    # Shared noise params.
     clip_sample: bool = True
     clip_sample_range: float = 1.0
+
+    # Optional transformer encoder for conditioning.
+    use_encoder: bool = False
+    n_encoder_layers: int = 6
 
     # Inference
     num_inference_steps: int | None = 100
@@ -144,10 +162,22 @@ class DiTConfig(PreTrainedConfig):
 
         """Input validation (not exhaustive)."""
 
-        if self.training_noise_sampling not in ("uniform", "beta"):
+        if self.noise_type not in ("flow_matching", "ddim"):
             raise ValueError(
-                f"`training_noise_sampling` must be either 'uniform' or 'beta'. Got {self.training_noise_sampling}."
+                f"`noise_type` must be 'flow_matching' or 'ddim'. Got {self.noise_type}."
             )
+
+        if self.noise_type == "flow_matching":
+            if self.training_noise_sampling not in ("uniform", "beta"):
+                raise ValueError(
+                    f"`training_noise_sampling` must be 'uniform' or 'beta'. Got {self.training_noise_sampling}."
+                )
+
+        if self.noise_type == "ddim":
+            if self.prediction_type not in ("epsilon", "sample"):
+                raise ValueError(
+                    f"`prediction_type` must be 'epsilon' or 'sample'. Got {self.prediction_type}."
+                )
 
     def get_optimizer_preset(self) -> AdamConfig:
         return AdamConfig(
