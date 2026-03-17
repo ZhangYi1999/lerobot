@@ -7,6 +7,7 @@ STEPS=10000
 SAVE_FREQ=10000
 LOG_FREQ=100
 GRAD_ACCUM_STEPS=4
+MIXED_PRECISION="${MIXED_PRECISION:-bf16}"  # Options: no, fp16, bf16
 
 DATASETS=(
     "real_0_put_bowl_filtered"
@@ -27,14 +28,15 @@ for DATASET in "${DATASETS[@]}"; do
     echo "=========================================="
     echo "Finetuning GROOT (grad accum ${GRAD_ACCUM_STEPS}x) on: ${DATASET}"
     echo "=========================================="
-    python -m lerobot.scripts.lerobot_train_gradient_accumulation \
+    accelerate launch --mixed_precision=${MIXED_PRECISION} \
+        --gradient_accumulation_steps=${GRAD_ACCUM_STEPS} \
+        -m lerobot.scripts.lerobot_train_gradient_accumulation \
         --job_name="groot_fft_${STEPS}steps_ga${GRAD_ACCUM_STEPS}_${DATASET}" \
         --output_dir="./outputs/train/groot_fft_${STEPS}steps_ga${GRAD_ACCUM_STEPS}_${DATASET}" \
         --dataset.repo_id="continuallearning/${DATASET}" \
         --policy.type=groot \
         --policy.push_to_hub=true \
         --policy.repo_id="continuallearning/groot_fft_${STEPS}steps_ga${GRAD_ACCUM_STEPS}_${DATASET}" \
-        --gradient_accumulation_steps=${GRAD_ACCUM_STEPS} \
         --batch_size=${BATCH_SIZE} \
         --num_workers=${NUM_WORKERS} \
         --steps=${STEPS} \

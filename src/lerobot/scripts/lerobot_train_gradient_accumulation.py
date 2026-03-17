@@ -2,19 +2,35 @@
 
 """Training script with gradient accumulation support.
 
-Drop-in replacement for lerobot_train.py that adds --gradient_accumulation_steps.
-Effective batch size = batch_size × num_processes × gradient_accumulation_steps.
+Drop-in replacement for lerobot_train.py that properly handles gradient accumulation
+via HuggingFace Accelerate. Configure accumulation steps through accelerate:
+
+    # Option A: accelerate config → set gradient_accumulation_steps in YAML
+    accelerate launch -m lerobot.scripts.lerobot_train_gradient_accumulation ...
+
+    # Option B: CLI flag
+    accelerate launch --gradient_accumulation_steps 4 \
+        -m lerobot.scripts.lerobot_train_gradient_accumulation ...
+
+Semantics:
+    - cfg.steps = number of optimizer steps (actual weight updates)
+    - Total micro-batches = cfg.steps × gradient_accumulation_steps
+    - Effective batch size = batch_size × num_processes × gradient_accumulation_steps
+    - log_freq, save_freq, eval_freq all count optimizer steps
 """
 
 import dataclasses
 import logging
 import time
+from contextlib import nullcontext
 from pprint import pformat
+from typing import Any
 
 import torch
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 from termcolor import colored
+from torch.optim import Optimizer
 from tqdm import tqdm
 
 from lerobot.configs import parser
@@ -26,9 +42,9 @@ from lerobot.envs.factory import make_env, make_env_pre_post_processors
 from lerobot.envs.utils import close_envs
 from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies.factory import make_policy, make_pre_post_processors
+from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.rl.wandb_utils import WandBLogger
 from lerobot.scripts.lerobot_eval import eval_policy_all
-from lerobot.scripts.lerobot_train import update_policy
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.utils.random_utils import set_seed
@@ -47,23 +63,91 @@ from lerobot.utils.utils import (
 )
 
 
-@dataclasses.dataclass
-class TrainGradAccumConfig(TrainPipelineConfig):
-    gradient_accumulation_steps: int = 1
+def update_policy_accum(
+    train_metrics: MetricsTracker,
+    policy: PreTrainedPolicy,
+    batch: Any,
+    optimizer: Optimizer,
+    grad_clip_norm: float,
+    accelerator: Accelerator,
+    lr_scheduler=None,
+    lock=None,
+    rabc_weights_provider=None,
+) -> tuple[MetricsTracker, dict]:
+    """Single training micro-step, accumulation-aware.
+
+    Unlike the original update_policy, this function:
+    - Only clips gradients on sync steps (after all micro-batches accumulated)
+    - Only steps lr_scheduler on sync steps
+    - Only calls policy.update() on sync steps
+    optimizer.step() and optimizer.zero_grad() are wrapped by accelerator.accumulate()
+    and automatically become no-ops on non-sync steps.
+    """
+    start_time = time.perf_counter()
+    policy.train()
+
+    rabc_batch_weights = None
+    rabc_batch_stats = None
+    if rabc_weights_provider is not None:
+        rabc_batch_weights, rabc_batch_stats = rabc_weights_provider.compute_batch_weights(batch)
+
+    with accelerator.autocast():
+        if rabc_batch_weights is not None:
+            per_sample_loss, output_dict = policy.forward(batch, reduction="none")
+            epsilon = 1e-6
+            loss = (per_sample_loss * rabc_batch_weights).sum() / (rabc_batch_weights.sum() + epsilon)
+            output_dict["rabc_mean_weight"] = rabc_batch_stats["raw_mean_weight"]
+            output_dict["rabc_num_zero_weight"] = rabc_batch_stats["num_zero_weight"]
+            output_dict["rabc_num_full_weight"] = rabc_batch_stats["num_full_weight"]
+        else:
+            loss, output_dict = policy.forward(batch)
+
+    accelerator.backward(loss)
+
+    # Only clip gradients on sync step (after all micro-batches accumulated)
+    grad_norm = None
+    if accelerator.sync_gradients:
+        if grad_clip_norm > 0:
+            grad_norm = accelerator.clip_grad_norm_(policy.parameters(), grad_clip_norm)
+        else:
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                policy.parameters(), float("inf"), error_if_nonfinite=False
+            )
+
+    # Wrapped by accumulate(): no-op on non-sync steps
+    with lock if lock is not None else nullcontext():
+        optimizer.step()
+    optimizer.zero_grad()
+
+    # Only step scheduler and update policy buffers on actual optimizer steps
+    if accelerator.sync_gradients:
+        if lr_scheduler is not None:
+            lr_scheduler.step()
+        if has_method(accelerator.unwrap_model(policy, keep_fp32_wrapper=True), "update"):
+            accelerator.unwrap_model(policy, keep_fp32_wrapper=True).update()
+
+    train_metrics.loss = loss.item()
+    if grad_norm is not None:
+        train_metrics.grad_norm = grad_norm.item()
+    train_metrics.lr = optimizer.param_groups[0]["lr"]
+    train_metrics.update_s = time.perf_counter() - start_time
+    return train_metrics, output_dict
 
 
 @parser.wrap()
-def train(cfg: TrainGradAccumConfig):
+def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     cfg.validate()
 
-    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-    force_cpu = cfg.policy.device == "cpu"
-    accelerator = Accelerator(
-        gradient_accumulation_steps=cfg.gradient_accumulation_steps,
-        step_scheduler_with_optimizer=False,
-        kwargs_handlers=[ddp_kwargs],
-        cpu=force_cpu,
-    )
+    if accelerator is None:
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+        force_cpu = cfg.policy.device == "cpu"
+        accelerator = Accelerator(
+            step_scheduler_with_optimizer=False,
+            kwargs_handlers=[ddp_kwargs],
+            cpu=force_cpu,
+        )
+
+    grad_accum_steps = accelerator.gradient_accumulation_steps
 
     init_logging(accelerator=accelerator)
     is_main_process = accelerator.is_main_process
@@ -148,6 +232,7 @@ def train(cfg: TrainGradAccumConfig):
     rabc_weights = None
     if cfg.use_rabc:
         from lerobot.utils.rabc import RABCWeights
+
         chunk_size = getattr(policy.config, "chunk_size", None)
         if chunk_size is None:
             raise ValueError("Chunk size is not found in policy config")
@@ -162,7 +247,7 @@ def train(cfg: TrainGradAccumConfig):
             device=device,
         )
 
-    step = 0
+    step = 0  # optimizer steps completed
     if cfg.resume:
         step, optimizer, lr_scheduler = load_training_state(cfg.checkpoint_path, optimizer, lr_scheduler)
 
@@ -177,14 +262,23 @@ def train(cfg: TrainGradAccumConfig):
             env_preprocessor, env_postprocessor = make_env_pre_post_processors(
                 env_cfg=cfg.env, policy_cfg=cfg.policy
             )
-        logging.info(f"{cfg.steps=} ({format_big_number(cfg.steps)})")
+        num_processes = accelerator.num_processes
+        effective_bs = cfg.batch_size * num_processes * grad_accum_steps
+        total_micro_steps = cfg.steps * grad_accum_steps
+        logging.info(
+            colored("Gradient accumulation:", "cyan", attrs=["bold"])
+            + f" {grad_accum_steps} micro-batches per optimizer step"
+        )
+        logging.info(
+            f"Micro batch size: {cfg.batch_size}, "
+            f"Effective batch size: {cfg.batch_size} x {num_processes} x {grad_accum_steps} = {effective_bs}"
+        )
+        logging.info(
+            f"Optimizer steps: {cfg.steps} ({format_big_number(cfg.steps)}), "
+            f"Total micro-batches: {total_micro_steps} ({format_big_number(total_micro_steps)})"
+        )
         logging.info(f"{dataset.num_frames=} ({format_big_number(dataset.num_frames)})")
         logging.info(f"{dataset.num_episodes=}")
-        num_processes = accelerator.num_processes
-        effective_bs = cfg.batch_size * num_processes * cfg.gradient_accumulation_steps
-        logging.info(
-            f"Effective batch size: {cfg.batch_size} x {num_processes} x {cfg.gradient_accumulation_steps} = {effective_bs}"
-        )
         logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
         logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
@@ -227,7 +321,6 @@ def train(cfg: TrainGradAccumConfig):
         "dataloading_s": AverageMeter("data_s", ":.3f"),
     }
 
-    effective_batch_size = cfg.batch_size * accelerator.num_processes * cfg.gradient_accumulation_steps
     train_tracker = MetricsTracker(
         cfg.batch_size,
         dataset.num_frames,
@@ -237,27 +330,31 @@ def train(cfg: TrainGradAccumConfig):
         accelerator=accelerator,
     )
 
+    optimizer_step = step  # tracks actual weight updates
+
     if is_main_process:
         progbar = tqdm(
-            total=cfg.steps - step,
+            total=cfg.steps - optimizer_step,
             desc="Training",
             unit="step",
             disable=inside_slurm(),
             position=0,
             leave=True,
         )
+        effective_batch_size = cfg.batch_size * accelerator.num_processes * grad_accum_steps
         logging.info(
             f"Start offline training on a fixed dataset, with effective batch size: {effective_batch_size}"
         )
 
-    for _ in range(step, cfg.steps):
+    total_micro_steps = cfg.steps * grad_accum_steps
+    for _micro in range(optimizer_step * grad_accum_steps, total_micro_steps):
         start_time = time.perf_counter()
         batch = next(dl_iter)
         batch = preprocessor(batch)
         train_tracker.dataloading_s = time.perf_counter() - start_time
 
         with accelerator.accumulate(policy):
-            train_tracker, output_dict = update_policy(
+            train_tracker, output_dict = update_policy_accum(
                 train_tracker,
                 policy,
                 batch,
@@ -268,13 +365,18 @@ def train(cfg: TrainGradAccumConfig):
                 rabc_weights_provider=rabc_weights,
             )
 
-        step += 1
+        # Only act on actual optimizer steps
+        if not accelerator.sync_gradients:
+            continue
+
+        optimizer_step += 1
         if is_main_process:
             progbar.update(1)
         train_tracker.step()
-        is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0 and is_main_process
-        is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
-        is_eval_step = cfg.eval_freq > 0 and step % cfg.eval_freq == 0
+
+        is_log_step = cfg.log_freq > 0 and optimizer_step % cfg.log_freq == 0 and is_main_process
+        is_saving_step = optimizer_step % cfg.save_freq == 0 or optimizer_step == cfg.steps
+        is_eval_step = cfg.eval_freq > 0 and optimizer_step % cfg.eval_freq == 0
 
         if is_log_step:
             logging.info(train_tracker)
@@ -291,16 +393,16 @@ def train(cfg: TrainGradAccumConfig):
                             "rabc_num_frames": rabc_stats["num_frames"],
                         }
                     )
-                wandb_logger.log_dict(wandb_log_dict, step)
+                wandb_logger.log_dict(wandb_log_dict, optimizer_step)
             train_tracker.reset_averages()
 
         if cfg.save_checkpoint and is_saving_step:
             if is_main_process:
-                logging.info(f"Checkpoint policy after step {step}")
-                checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
+                logging.info(f"Checkpoint policy after step {optimizer_step}")
+                checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, optimizer_step)
                 save_checkpoint(
                     checkpoint_dir=checkpoint_dir,
-                    step=step,
+                    step=optimizer_step,
                     cfg=cfg,
                     policy=accelerator.unwrap_model(policy),
                     optimizer=optimizer,
@@ -315,8 +417,8 @@ def train(cfg: TrainGradAccumConfig):
 
         if cfg.env and is_eval_step:
             if is_main_process:
-                step_id = get_step_identifier(step, cfg.steps)
-                logging.info(f"Eval policy at step {step}")
+                step_id = get_step_identifier(optimizer_step, cfg.steps)
+                logging.info(f"Eval policy at step {optimizer_step}")
                 with torch.no_grad(), accelerator.autocast():
                     eval_info = eval_policy_all(
                         envs=eval_env,
@@ -344,7 +446,7 @@ def train(cfg: TrainGradAccumConfig):
                     dataset.num_frames,
                     dataset.num_episodes,
                     eval_metrics,
-                    initial_step=step,
+                    initial_step=optimizer_step,
                     accelerator=accelerator,
                 )
                 eval_tracker.eval_s = aggregated.pop("eval_s")
@@ -352,8 +454,8 @@ def train(cfg: TrainGradAccumConfig):
                 eval_tracker.pc_success = aggregated.pop("pc_success")
                 if wandb_logger:
                     wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
-                    wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
-                    wandb_logger.log_video(eval_info["overall"]["video_paths"][0], step, mode="eval")
+                    wandb_logger.log_dict(wandb_log_dict, optimizer_step, mode="eval")
+                    wandb_logger.log_video(eval_info["overall"]["video_paths"][0], optimizer_step, mode="eval")
             accelerator.wait_for_everyone()
 
     if is_main_process:
