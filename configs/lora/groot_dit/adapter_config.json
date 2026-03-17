@@ -1,0 +1,19 @@
+{
+    "peft_type": "LORA",
+    "r": 32,
+    "lora_alpha": 32,
+    "lora_dropout": 0.0,
+    "bias": "none",
+    "task_type": null,
+    "target_modules": [
+        "action_head.model.transformer_blocks.*.attn1.to_q",
+        "action_head.model.transformer_blocks.*.attn1.to_k",
+        "action_head.model.transformer_blocks.*.attn1.to_v",
+        "action_head.model.transformer_blocks.*.attn1.to_out.0",
+        "action_head.model.transformer_blocks.*.ff.net.0",
+        "action_head.model.transformer_blocks.*.ff.net.2",
+        "action_head.model.proj_out_1",
+        "action_head.model.proj_out_2"
+    ],
+    "modules_to_save": null
+}

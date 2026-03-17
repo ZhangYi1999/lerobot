@@ -1,0 +1,24 @@
+{
+    "peft_type": "LORA",
+    "r": 32,
+    "lora_alpha": 32,
+    "lora_dropout": 0.0,
+    "bias": "none",
+    "task_type": null,
+    "target_modules": [
+        "dit.velocity_net.cond_proj",
+        "dit.velocity_net.cond_proj.encoder.layers.*.self_attn.out_proj",
+        "dit.velocity_net.cond_proj.encoder.layers.*.mlp.linear1",
+        "dit.velocity_net.cond_proj.encoder.layers.*.mlp.linear2",
+        "dit.velocity_net.decoder.layers.*.self_attn.out_proj",
+        "dit.velocity_net.decoder.layers.*.mlp.linear1",
+        "dit.velocity_net.decoder.layers.*.mlp.linear2",
+        "dit.velocity_net.decoder.layers.*.attn_modulate.scale",
+        "dit.velocity_net.decoder.layers.*.attn_modulate.shift",
+        "dit.velocity_net.decoder.layers.*.attn_gate.scale",
+        "dit.velocity_net.decoder.layers.*.mlp_modulate.scale",
+        "dit.velocity_net.decoder.layers.*.mlp_modulate.shift",
+        "dit.velocity_net.decoder.layers.*.mlp_gate.scale"
+    ],
+    "modules_to_save": null
+}

@@ -3,6 +3,7 @@ set -e
 
 STEPS=30000
 SAVE_FREQ=30000
+MIXED_PRECISION="${MIXED_PRECISION:-bf16}"  # Options: no, fp16, bf16
 
 DATASETS=(
     # "real_0_put_bowl_filtered"
@@ -27,7 +28,8 @@ for DATASET in "${DATASETS[@]}"; do
     echo "=========================================="
     echo "Training diffusion on: ${DATASET}"
     echo "=========================================="
-    lerobot-train \
+    accelerate launch --mixed_precision=${MIXED_PRECISION} \
+        -m lerobot.scripts.lerobot_train \
         --job_name="diffusion_fft_${DATASET}" \
         --output_dir="./outputs/train/diffusion_fft_${DATASET}" \
         --dataset.repo_id="continuallearning/${DATASET}" \
