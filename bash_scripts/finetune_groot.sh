@@ -6,6 +6,7 @@ NUM_WORKERS=8
 STEPS=10000
 SAVE_FREQ=10000
 LOG_FREQ=100
+MIXED_PRECISION="${MIXED_PRECISION:-bf16}"  # Options: no, fp16, bf16
 
 DATASETS=(
     "real_0_put_bowl_filtered"
@@ -26,7 +27,8 @@ for DATASET in "${DATASETS[@]}"; do
     echo "=========================================="
     echo "Finetuning GROOT on: ${DATASET}"
     echo "=========================================="
-    lerobot-train \
+    accelerate launch --mixed_precision=${MIXED_PRECISION} \
+        -m lerobot.scripts.lerobot_train \
         --job_name="groot_fft_${STEPS}steps_${DATASET}" \
         --output_dir="./outputs/train/groot_fft_${STEPS}steps_${DATASET}" \
         --dataset.repo_id="continuallearning/${DATASET}" \
