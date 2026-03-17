@@ -23,8 +23,8 @@ for DATASET in "${DATASETS[@]}"; do
         echo "=========================================="
         accelerate launch --mixed_precision=${MIXED_PRECISION} \
             -m lerobot.scripts.lerobot_train \
-            --job_name="dit_fft_${DATASET}_s${SEED}" \
-            --output_dir="./outputs/train/dit_fft_${DATASET}_s${SEED}" \
+            --job_name="dit_fft_${DATASET}_seed${SEED}" \
+            --output_dir="./outputs/train/dit_fft_${DATASET}_seed${SEED}" \
             --dataset.repo_id="continuallearning/${DATASET}" \
             --policy.type=dit \
             --policy.push_to_hub=true \

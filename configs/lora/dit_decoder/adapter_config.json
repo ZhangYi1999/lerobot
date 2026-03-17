@@ -6,15 +6,14 @@
     "bias": "none",
     "task_type": null,
     "target_modules": [
-        "dit.velocity_net.decoder.layers.*.self_attn.out_proj",
-        "dit.velocity_net.decoder.layers.*.mlp.linear1",
-        "dit.velocity_net.decoder.layers.*.mlp.linear2",
-        "dit.velocity_net.decoder.layers.*.attn_modulate.scale",
-        "dit.velocity_net.decoder.layers.*.attn_modulate.shift",
-        "dit.velocity_net.decoder.layers.*.attn_gate.scale",
-        "dit.velocity_net.decoder.layers.*.mlp_modulate.scale",
-        "dit.velocity_net.decoder.layers.*.mlp_modulate.shift",
-        "dit.velocity_net.decoder.layers.*.mlp_gate.scale"
+        "mlp.linear1",
+        "mlp.linear2",
+        "attn_modulate.scale",
+        "attn_modulate.shift",
+        "attn_gate.scale",
+        "mlp_modulate.scale",
+        "mlp_modulate.shift",
+        "mlp_gate.scale"
     ],
     "modules_to_save": null
 }

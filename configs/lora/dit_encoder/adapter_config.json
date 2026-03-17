@@ -6,10 +6,7 @@
     "bias": "none",
     "task_type": null,
     "target_modules": [
-        "dit.velocity_net.cond_proj",
-        "dit.velocity_net.cond_proj.encoder.layers.*.self_attn.out_proj",
-        "dit.velocity_net.cond_proj.encoder.layers.*.mlp.linear1",
-        "dit.velocity_net.cond_proj.encoder.layers.*.mlp.linear2"
+        "cond_proj"
     ],
     "modules_to_save": null
 }
