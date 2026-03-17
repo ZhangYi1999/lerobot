@@ -15,6 +15,7 @@
 # limitations under the License.
 import dataclasses
 import logging
+import os
 import time
 from contextlib import nullcontext
 from pprint import pformat
@@ -239,7 +240,15 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         rename_map=cfg.rename_map,
     )
 
-    if cfg.peft is not None:
+    peft_config_path = os.environ.get("PEFT_CONFIG_PATH")
+    if peft_config_path is not None:
+        from peft import PeftConfig as PeftLibConfig
+
+        logging.info(f"Loading PEFT config from {peft_config_path}")
+        peft_config = PeftLibConfig.from_pretrained(peft_config_path)
+        peft_cli_overrides = dataclasses.asdict(cfg.peft) if cfg.peft is not None else None
+        policy = policy.wrap_with_peft(peft_config=peft_config, peft_cli_overrides=peft_cli_overrides)
+    elif cfg.peft is not None:
         logging.info("Using PEFT! Wrapping model.")
         # Convert CLI peft config to dict for overrides
         peft_cli_overrides = dataclasses.asdict(cfg.peft)
