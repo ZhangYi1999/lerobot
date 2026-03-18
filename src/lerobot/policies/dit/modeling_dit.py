@@ -21,6 +21,7 @@ from transformers import CLIPTextModel, CLIPTokenizer, AutoModel
 from lerobot.utils.constants import OBS_ENV_STATE, OBS_STATE, ACTION, OBS_IMAGES
 from lerobot.policies.dit.configuration_dit import DiTConfig
 from lerobot.policies.pretrained import PreTrainedPolicy
+from lerobot.policies.rtc.modeling_rtc import RTCProcessor
 from lerobot.policies.utils import (
     get_device_from_parameters,
     get_dtype_from_parameters,
@@ -501,6 +502,10 @@ class _DiTNoiseNet(nn.Module):
         timesteps: int = 100,
         generator: torch.Generator | None = None,
         noise_scheduler=None,
+        rtc_processor: RTCProcessor | None = None,
+        prev_chunk_left_over: torch.Tensor | None = None,
+        inference_delay: int = 0,
+        execution_horizon: int | None = None,
     ) -> torch.Tensor:
         batch_size = condition.shape[0] if not self.use_encoder else condition.shape[0]
         device = condition.device
@@ -512,7 +517,7 @@ class _DiTNoiseNet(nn.Module):
             enc_cache = self.forward_enc(condition)
 
         if noise_scheduler is not None:
-            # DDIM path
+            # DDIM path（不支持 RTC）
             noise_scheduler.set_timesteps(timesteps)
             for t in noise_scheduler.timesteps:
                 t_batch = torch.full(
@@ -525,7 +530,7 @@ class _DiTNoiseNet(nn.Module):
                     model_output, t, x, generator=generator
                 ).prev_sample
         else:
-            # Flow matching path (Euler ODE solver)
+            # Flow matching path（Euler ODE 求解，支持 RTC 平滑）
             dt = 1.0 / timesteps
             t_all = (
                 torch.arange(timesteps, device=device)
@@ -533,8 +538,29 @@ class _DiTNoiseNet(nn.Module):
                 / timesteps
             )
             for k in range(timesteps):
-                t = t_all[:, k]
-                x = x + dt * self.forward(x, t, condition, enc_cache=enc_cache)
+                t = t_all[:, k]  # shape (B,), 值域 0→1
+
+                if rtc_processor is not None and prev_chunk_left_over is not None:
+                    # RTC 引导：将 DiT 的 0→1 时间轴转换为 RTC 的 1→0 约定
+                    time_rtc = 1.0 - t[0].item()
+
+                    def _denoise_partial(x_in, _t=t, _enc=enc_cache):
+                        v = self.forward(x_in, _t, condition, enc_cache=_enc)
+                        return -v  # 取反：DiT(0→1) → RTC(1→0) 速度约定
+
+                    v_rtc = rtc_processor.denoise_step(
+                        x_t=x,
+                        prev_chunk_left_over=prev_chunk_left_over,
+                        inference_delay=inference_delay,
+                        time=time_rtc,
+                        original_denoise_step_partial=_denoise_partial,
+                        execution_horizon=execution_horizon,
+                    )
+                    velocity = -v_rtc  # 转回 DiT 约定（正方向）
+                else:
+                    velocity = self.forward(x, t, condition, enc_cache=enc_cache)
+
+                x = x + dt * velocity
 
         if self.clip_sample:
             x = torch.clamp(x, -self.clip_sample_range, self.clip_sample_range)
@@ -566,11 +592,21 @@ class DiTPolicy(PreTrainedPolicy):
         self._queues = None
 
         self.dit = DiTModel(config)
+        self.init_rtc_processor()
 
         self.reset()
 
     def get_optim_params(self) -> dict:
         return self.dit.parameters()
+
+    def init_rtc_processor(self) -> None:
+        """初始化 RTC processor（若配置中启用了 rtc_config）。"""
+        self.rtc_processor: RTCProcessor | None = None
+        if self.config.rtc_config is not None:
+            self.rtc_processor = RTCProcessor(self.config.rtc_config)
+
+    def _rtc_enabled(self) -> bool:
+        return self.config.rtc_config is not None and self.config.rtc_config.enabled
 
     def reset(self):
         """Clear observation and action queues. Should be called on `env.reset()`"""
@@ -582,16 +618,32 @@ class DiTPolicy(PreTrainedPolicy):
             self._queues["observation.images"] = deque(maxlen=self.config.n_obs_steps)
         if self.config.env_state_feature:
             self._queues["observation.environment_state"] = deque(maxlen=self.config.n_obs_steps)
+        # 保存上一完整 chunk（含 overlap 部分），供 RTC 引导使用
+        self._prev_actions: torch.Tensor | None = None
 
     @torch.no_grad()
-    def predict_action_chunk(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    def predict_action_chunk(
+        self,
+        batch: dict[str, torch.Tensor],
+        prev_chunk_left_over: torch.Tensor | None = None,
+        inference_delay: int = 0,
+        execution_horizon: int | None = None,
+    ) -> torch.Tensor:
         """Predict a chunk of actions given environment observations."""
         # stack n latest observations from the queue
         for key in batch:
             if key in self._queues:
                 batch[key] = torch.stack(list(self._queues[key]), dim=1)
 
-        actions = self.dit.generate_actions(batch)
+        actions = self.dit.generate_actions(
+            batch,
+            rtc_processor=self.rtc_processor if self._rtc_enabled() else None,
+            prev_chunk_left_over=prev_chunk_left_over,
+            inference_delay=inference_delay,
+            execution_horizon=execution_horizon,
+            # RTC 启用时返回完整 horizon，以便保存 overlap 供下次引导
+            return_full_chunk=self._rtc_enabled(),
+        )
 
         return actions
 
@@ -616,6 +668,10 @@ class DiTPolicy(PreTrainedPolicy):
         Note that this means we require: `n_action_steps <= horizon - n_obs_steps + 1`. Also, note that
         "horizon" may not the best name to describe what the variable actually means, because this period is
         actually measured from the first observation which (if `n_obs_steps` > 1) happened in the past.
+
+        When RTC is enabled, the full predicted chunk (horizon steps from current observation) is stored
+        as `_prev_actions`. On the next call, the portion beyond `n_action_steps` serves as RTC guidance
+        for smooth chunk-to-chunk transitions. Requires `n_action_steps < horizon - n_obs_steps + 1`.
         """
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
@@ -626,7 +682,29 @@ class DiTPolicy(PreTrainedPolicy):
         self._queues = populate_queues(self._queues, batch)
 
         if len(self._queues["action"]) == 0:
-            actions = self.predict_action_chunk(batch)
+            # 计算上一 chunk 的 overlap 尾部作为 RTC 引导
+            prev_left_over = None
+            if self._rtc_enabled() and self._prev_actions is not None:
+                n = self.config.n_action_steps
+                if self._prev_actions.shape[1] > n:
+                    prev_left_over = self._prev_actions[:, n:, :]
+
+            full_actions = self.predict_action_chunk(
+                batch,
+                prev_chunk_left_over=prev_left_over,
+                inference_delay=0,  # 同步推理，无延迟
+                execution_horizon=(
+                    self.config.rtc_config.execution_horizon if self._rtc_enabled() else None
+                ),
+            )
+
+            if self._rtc_enabled():
+                # full_actions shape: (B, horizon - n_obs_steps + 1, action_dim)
+                self._prev_actions = full_actions  # 保存完整 chunk 供下次 RTC 使用
+                actions = full_actions[:, : self.config.n_action_steps]  # 只执行前 n_action_steps 步
+            else:
+                actions = full_actions
+
             self._queues[ACTION].extend(actions.transpose(0, 1))
 
         action = self._queues[ACTION].popleft()
@@ -745,6 +823,10 @@ class DiTModel(nn.Module):
         batch_size: int,
         global_cond: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
+        rtc_processor: RTCProcessor | None = None,
+        prev_chunk_left_over: torch.Tensor | None = None,
+        inference_delay: int = 0,
+        execution_horizon: int | None = None,
     ) -> torch.Tensor:
         device = get_device_from_parameters(self)
         dtype = get_dtype_from_parameters(self)
@@ -761,6 +843,10 @@ class DiTModel(nn.Module):
             timesteps=self.num_inference_steps,
             generator=generator,
             noise_scheduler=noise_scheduler,
+            rtc_processor=rtc_processor,
+            prev_chunk_left_over=prev_chunk_left_over,
+            inference_delay=inference_delay,
+            execution_horizon=execution_horizon,
         )
         return sample
 
@@ -852,7 +938,15 @@ class DiTModel(nn.Module):
 
             return torch.cat(global_cond_tokens, dim=1)  # (B, T_total, hidden_dim)
 
-    def generate_actions(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    def generate_actions(
+        self,
+        batch: dict[str, torch.Tensor],
+        rtc_processor: RTCProcessor | None = None,
+        prev_chunk_left_over: torch.Tensor | None = None,
+        inference_delay: int = 0,
+        execution_horizon: int | None = None,
+        return_full_chunk: bool = False,
+    ) -> torch.Tensor:
         """
         This function expects `batch` to have:
         {
@@ -862,6 +956,10 @@ class DiTModel(nn.Module):
                 AND/OR
             "observation.environment_state": (B, environment_dim)
         }
+
+        Args:
+            return_full_chunk: 若为 True，返回完整 horizon 步（供 RTC 保存 overlap 使用），
+                否则只返回 n_action_steps 步（默认行为）。
         """
         batch_size, n_obs_steps = batch["observation.state"].shape[:2]
         assert n_obs_steps == self.config.n_obs_steps
@@ -869,7 +967,18 @@ class DiTModel(nn.Module):
         global_cond = self._prepare_global_conditioning(batch)
 
         # run sampling
-        actions = self.conditional_sample(batch_size, global_cond=global_cond)
+        actions = self.conditional_sample(
+            batch_size,
+            global_cond=global_cond,
+            rtc_processor=rtc_processor,
+            prev_chunk_left_over=prev_chunk_left_over,
+            inference_delay=inference_delay,
+            execution_horizon=execution_horizon,
+        )
+
+        if return_full_chunk:
+            # 返回从当前观测时刻开始的完整 horizon 步，供 RTC overlap 存储
+            return actions[:, n_obs_steps - 1 :]
 
         # Extract `n_action_steps` steps worth of actions (from the current observation).
         start = n_obs_steps - 1

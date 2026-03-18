@@ -20,6 +20,7 @@ from lerobot.optim.optimizers import AdamConfig
 from lerobot.optim.schedulers import DiffuserSchedulerConfig
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import NormalizationMode
+from lerobot.policies.rtc.configuration_rtc import RTCConfig
 
 
 @PreTrainedConfig.register_subclass("dit")
@@ -156,6 +157,9 @@ class DiTConfig(PreTrainedConfig):
     optimizer_weight_decay: float = 1e-6
     scheduler_name: str = "cosine"
     scheduler_warmup_steps: int = 500
+
+    # Real-Time Chunking (RTC) 配置，推理时可选开启平滑
+    rtc_config: RTCConfig | None = None
 
     def __post_init__(self):
         super().__post_init__()
