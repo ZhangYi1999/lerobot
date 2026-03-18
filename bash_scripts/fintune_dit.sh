@@ -2,15 +2,15 @@
 set -e
 
 # ===== Configuration =====
-STEPS=200000
+STEPS=20000
 SAVE_FREQ=20000
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"  # Options: no, fp16, bf16
 
 SEEDS=(1000)
 
 DATASETS=(
-    # "real_0_put_bowl_filtered"
-    # "real_1_stack_bowls_filtered"
+    "real_0_put_bowl_filtered"
+    "real_1_stack_bowls_filtered"
     # "real_2_put_moka_pot_filtered"
     # "real_3_close_drawer_filtered"
 )

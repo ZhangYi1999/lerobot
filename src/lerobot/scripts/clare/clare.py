@@ -97,6 +97,9 @@ class PEFTTrainPipelineConfig(TrainPipelineConfig):
     # For discriminator phase: path to adapter checkpoint from Phase 1
     adapter_checkpoint_path: Path | None = None
 
+    # For discriminator_only phase: which task's discriminator to train
+    discriminator_task_id: int = -1
+
     detect_disctribution_shift_steps: int = 200
     detect_disctribution_shift_batch_size: int = 32
     detect_disctribution_shift_num_workers: int = 16
@@ -128,8 +131,14 @@ class PEFTTrainPipelineConfig(TrainPipelineConfig):
     max_episodes_rendered: int = 4
 
     def __post_init__(self):
-        assert self.phase in ("full", "adapter", "discriminator"), f"phase must be full/adapter/discriminator, got {self.phase}"
+        assert self.phase in ("full", "adapter", "discriminator", "discriminator_only"), \
+            f"phase must be full/adapter/discriminator/discriminator_only, got {self.phase}"
         assert self.peft_cfg_path or self.peft_weight_path, "One from (peft_cfg_path,peft_weight_path) must be specified"
+        if self.phase == "discriminator_only":
+            assert self.discriminator_task_id >= 0, \
+                "discriminator_task_id must be >= 0 for discriminator_only phase"
+            assert self.peft_weight_path, \
+                "peft_weight_path must be specified for discriminator_only phase (converted CLARE checkpoint)"
 
 
 def _prefix_keys(d: dict, prefix: str) -> dict:
@@ -923,6 +932,160 @@ def train_discriminator(cfg: PEFTTrainPipelineConfig):
     accelerator.end_training()
 
 
+def train_discriminator_only(cfg: PEFTTrainPipelineConfig):
+    """Train discriminators for a single task on a pre-converted CLARE checkpoint.
+
+    Unlike train_discriminator(), this skips _expand_layers() because adapters and
+    discriminators already exist in the checkpoint (from convert_lora_to_clare.py).
+    Only trains the discriminator for cfg.discriminator_task_id.
+    """
+    (accelerator, device, dataset, eval_env, env_preprocessor, env_postprocessor,
+     policy, peft_policy, peft_modules, peft_config, preprocessor, postprocessor, wandb_logger) = _setup_common(cfg)
+
+    task_id = cfg.discriminator_task_id
+    logging.info(f"Training discriminator for task {task_id} (discriminator_only mode)")
+
+    # Set up forwarding: each CLARELayer forwards the adapter and discriminator for this task
+    discriminator_params = []
+    for peft_module in peft_modules:
+        if task_id >= peft_module.num_discriminators:
+            raise ValueError(
+                f"discriminator_task_id={task_id} but CLARELayer "
+                f"{peft_module.layer_name}.{peft_module.layer_id} only has "
+                f"{peft_module.num_discriminators} discriminators"
+            )
+        peft_module._forwarded_adapter_id = task_id
+        peft_module._forwarded_discriminator_id = task_id
+        peft_module._active_task = task_id
+        peft_module.train_discriminator(True)
+        peft_module.update_stats(True)
+
+        # Collect discriminator parameters for this task
+        disc = peft_module.clare_discriminators[peft_module.adapter_name][task_id]
+        discriminator_params.extend(list(disc.parameters()))
+
+    logging.info(f"Collected {len(discriminator_params)} discriminator parameters")
+
+    # Create discriminator optimizer
+    discriminator_optimizer = cfg.train_discriminator_optimizer.build(discriminator_params)
+    if cfg.train_discriminator_lr_scheduler:
+        discriminator_lr_scheduler = cfg.train_discriminator_lr_scheduler.build(
+            discriminator_optimizer, cfg.train_discriminators_steps
+        )
+    else:
+        discriminator_lr_scheduler = None
+
+    optimizer = discriminator_optimizer
+    lr_scheduler = discriminator_lr_scheduler
+
+    # Create dataloader
+    if hasattr(cfg.policy, "drop_n_last_frames"):
+        shuffle = False
+        sampler = EpisodeAwareSampler(
+            dataset.meta.episodes["dataset_from_index"],
+            dataset.meta.episodes["dataset_to_index"],
+            episode_indices_to_use=dataset.episodes,
+            drop_n_last_frames=cfg.policy.drop_n_last_frames,
+            shuffle=True,
+        )
+    else:
+        shuffle = True
+        sampler = None
+
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        num_workers=cfg.num_workers,
+        batch_size=cfg.batch_size,
+        shuffle=shuffle and not cfg.dataset.streaming,
+        sampler=sampler,
+        pin_memory=device.type == "cuda",
+        drop_last=False,
+        prefetch_factor=2 if cfg.num_workers > 0 else None,
+    )
+
+    # Prepare with accelerator
+    policy, optimizer, dataloader, lr_scheduler = accelerator.prepare(
+        policy, optimizer, dataloader, lr_scheduler
+    )
+    dl_iter = cycle(dataloader)
+
+    peft_modules = set_peft_module_train(peft_modules)
+
+    train_metrics = {
+        "loss": AverageMeter("loss", ":.3f"),
+        "grad_norm": AverageMeter("grdn", ":.3f"),
+        "lr": AverageMeter("lr", ":0.1e"),
+        "update_s": AverageMeter("updt_s", ":.3f"),
+        "dataloading_s": AverageMeter("data_s", ":.3f"),
+    }
+
+    for peft_module in peft_modules:
+        for discriminator_id in range(peft_module.num_discriminators):
+            key = f"{peft_module.layer_name}.{peft_module.layer_id}.{discriminator_id}"
+            train_metrics[f"loss_{key}"] = AverageMeter(f"loss_{key}", ":.3f")
+            train_metrics[f"running_mean_{key}"] = AverageMeter(f"running_mean_{key}", ":.3f")
+            train_metrics[f"running_std_{key}"] = AverageMeter(f"running_std_{key}", ":.3f")
+            train_metrics[f"num_batches_tracked_{key}"] = AverageMeter(f"num_batches_tracked_{key}", ":.0f")
+
+    step = 0
+    train_tracker = MetricsTracker(
+        cfg.batch_size, dataset.num_frames, dataset.num_episodes, train_metrics,
+        initial_step=step, accelerator=accelerator,
+    )
+
+    logging.info(f"Start training discriminator for task {task_id}")
+    for _ in range(cfg.train_discriminators_steps):
+        start_time = time.perf_counter()
+        batch = next(dl_iter)
+        batch = preprocessor(batch)
+        train_tracker.dataloading_s = time.perf_counter() - start_time
+
+        train_tracker, output_dict = update_policy(
+            train_tracker, policy, peft_modules, batch, optimizer,
+            cfg.optimizer.grad_clip_norm, accelerator=accelerator, lr_scheduler=lr_scheduler,
+        )
+
+        step += 1
+        train_tracker.step()
+
+        is_log_step = cfg.train_discriminators_log_freq > 0 and step % cfg.train_discriminators_log_freq == 0
+        is_saving_step = step % cfg.train_discriminators_save_freq == 0 or step == cfg.train_discriminators_steps
+        is_eval_step = cfg.train_discriminators_eval_freq > 0 and step % cfg.train_discriminators_eval_freq == 0
+
+        if is_log_step:
+            logging.info(train_tracker)
+            if wandb_logger:
+                wandb_log_dict = _prefix_keys(train_tracker.to_dict(), f"discriminator_task{task_id}")
+                if output_dict:
+                    wandb_log_dict.update(_prefix_keys(output_dict, f"discriminator_task{task_id}"))
+                wandb_logger.log_dict(wandb_log_dict, step, mode="train")
+            train_tracker.reset_averages()
+
+        if cfg.env and eval_env and is_eval_step:
+            _do_eval(cfg, step, policy, peft_modules, eval_env, env_preprocessor, env_postprocessor,
+                     preprocessor, postprocessor, dataset, wandb_logger, accelerator)
+
+        if cfg.save_checkpoint and is_saving_step:
+            logging.info(f"Checkpoint policy after step {step}")
+            checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
+
+            peft_policy.save_pretrained(str(checkpoint_dir / "adapter"))
+
+            save_checkpoint(
+                checkpoint_dir, step, cfg, accelerator.unwrap_model(policy), optimizer, lr_scheduler,
+                preprocessor=preprocessor, postprocessor=postprocessor,
+            )
+            update_last_checkpoint(checkpoint_dir)
+
+    if eval_env:
+        close_envs(eval_env)
+
+    logging.info(f"End of discriminator training for task {task_id}")
+
+    accelerator.wait_for_everyone()
+    accelerator.end_training()
+
+
 @parser.wrap()
 def train(cfg: PEFTTrainPipelineConfig):
     cfg.validate()
@@ -931,6 +1094,8 @@ def train(cfg: PEFTTrainPipelineConfig):
         train_adapter(cfg)
     elif cfg.phase == "discriminator":
         train_discriminator(cfg)
+    elif cfg.phase == "discriminator_only":
+        train_discriminator_only(cfg)
     else:  # "full" — original behavior
         train_adapter(cfg)
         train_discriminator(cfg)

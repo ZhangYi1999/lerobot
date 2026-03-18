@@ -199,3 +199,45 @@ docker run --rm -v $HOME/.cache/huggingface:/cache ghcr.io/zhangyi1999/clare-tra
 - **Base model is `nvidia/GR00T-N1.5-3B`** (gated, needs HF token). `lerobot/gr00t-1.5b` does NOT exist.
 - **Checkpoint structure**: `{output_dir}/checkpoints/last/` (symlink) → `adapter/` (PEFT weights) + `pretrained_model/` (base policy). PackNet adds `pretrained_model/mask.safetensors`. EWC saves Fisher state separately as `ewc_state_task{N}.pt`.
 - **Docker CUDA 12.8 incompatible with local RTX 4090** (driver 550.78 supports up to ~CUDA 12.4). Need CUDA 12.4 base image or test on RunPod A100.
+
+### 9. LoRA → CLARE Conversion Pipeline (2026-03-17)
+
+**Goal**: Train standard PEFT LoRA adapters per task, convert to CLARE format, then train discriminators for routing.
+
+**Why**: Simpler than full CLARE pipeline — no distribution shift detection or layer expansion during LoRA training. Separates feature learning from routing.
+
+**Feasibility**: CLARE's `LoRALinear` and standard PEFT LoRA are mathematically identical: `lora_b(lora_a(x)) * alpha/rank`, same `nn.Linear` shapes.
+
+**Key insight**: Cannot target multi-arg-forward modules (e.g., `_ShiftScaleMod(x, c)`) as CLARE targets because `CLARELayer.forward(self, x, **kwargs)` only accepts 1 positional arg. Must target individual `nn.Linear` sub-modules (`scale`, `shift`) directly.
+
+**Files created/modified**:
+
+| File | Purpose |
+|------|---------|
+| `configs/peft/clare_dit/adapter_config.json` | CLARE config for DiT: 6 patterns targeting modulation/gate Linear layers (`attn_modulate.scale/shift`, `attn_gate.scale`, `mlp_modulate.scale/shift`, `mlp_gate.scale`) per decoder layer. feature_dim=512, autoencoder discriminator. |
+| `src/lerobot/scripts/clare/convert_lora_to_clare.py` | Conversion script: loads N LoRA checkpoints, creates CLARE model shell, maps LoRA state dict keys to CLARE `LoRAFuncAdapter` keys, saves CLARE checkpoint. |
+| `src/lerobot/scripts/clare/clare.py` | Added `phase="discriminator_only"` + `discriminator_task_id` config. Skips `_expand_layers()`, trains discriminator for a single task on pre-converted CLARE checkpoint. |
+| `bash_scripts/run_lora_to_clare.sh` | 3-stage pipeline: (1) train LoRA per task, (2) convert to CLARE, (3) train discriminators per task. |
+
+**State dict key mapping** (LoRA → CLARE):
+```
+{module}.lora_A.default.weight → {module}.clare_func_adapters.default.{idx}.layer_wise_lora_adapters.self.lora_a.weight
+{parent}.{sub}.lora_B.default.weight → {parent}.clare_func_adapters.default.{idx}.layer_wise_lora_adapters.{sub}.lora_b.weight
+```
+
+**Pipeline usage**:
+```bash
+# Stage 1: Train LoRA per task (uses existing lora_finetune_dit_encoder.sh pattern)
+PEFT_CONFIG_PATH=configs/lora/dit_all accelerate launch -m lerobot.scripts.lerobot_train ...
+
+# Stage 2: Convert to CLARE
+python -m lerobot.scripts.clare.convert_lora_to_clare \
+    --lora_checkpoint_dirs task0/adapter task1/adapter ... \
+    --clare_config_path=configs/peft/clare_dit --output_dir=clare_converted
+
+# Stage 3: Train discriminators per task
+python -m lerobot.scripts.clare.clare --phase=discriminator_only \
+    --peft_weight_path=clare_converted/adapter --discriminator_task_id=0 ...
+```
+
+**Not yet verified**: End-to-end pipeline needs testing with actual LoRA checkpoints to validate key mapping and forward pass equivalence.

@@ -4,7 +4,7 @@ set -e
 # ===== Configuration =====
 # Pretrained checkpoint from full fine-tune (local or HuggingFace Hub)
 PRETRAINED_PATH="outputs/train/dit_fft_pretraining_v1_s1000/checkpoints/last/pretrained_model"
-LORA_CONFIG="dit_all"  # Options: dit_encoder, dit_decoder, dit_all
+LORA_CONFIG="dit_encoder"  # Options: dit_encoder, dit_decoder, dit_all
 STEPS=20000
 SAVE_FREQ=20000
 LOG_FREQ=100

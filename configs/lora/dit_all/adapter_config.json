@@ -7,8 +7,6 @@
     "task_type": null,
     "target_modules": [
         "cond_proj",
-        "mlp.linear1",
-        "mlp.linear2",
         "attn_modulate.scale",
         "attn_modulate.shift",
         "attn_gate.scale",
