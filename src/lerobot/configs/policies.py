@@ -93,6 +93,11 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
             )
             self.use_amp = False
 
+    def to_dict(self) -> dict:
+        import dataclasses
+
+        return {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
+
     @property
     def type(self) -> str:
         choice_name = self.get_choice_name(self.__class__)
