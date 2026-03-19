@@ -11,6 +11,7 @@ set -e
 PRETRAINED_PATH="outputs/train/dit_fft_pretraining_v1_s1000/checkpoints/last/pretrained_model"
 CLARE_CONFIG_PATH="configs/peft/clare_dit"
 BASE_OUTPUT="outputs/lora_to_clare"
+export REUSE_PRETRAINED_NORMALIZATION="${REUSE_PRETRAINED_NORMALIZATION:-true}"
 
 DATASETS=(
     "real_0_put_bowl_filtered"

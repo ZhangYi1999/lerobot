@@ -11,6 +11,7 @@ set -e
 PRETRAINED_PATH="outputs/train/dit_fft_pretraining_v1_s1000/checkpoints/last/pretrained_model"
 BASE_OUTPUT="outputs/lora_to_clare"
 CLARE_CHECKPOINT="${BASE_OUTPUT}/clare_converted/adapter/default"
+export REUSE_PRETRAINED_NORMALIZATION="${REUSE_PRETRAINED_NORMALIZATION:-true}"
 
 DISC_STEPS=2000
 DISC_LOG_FREQ=50
