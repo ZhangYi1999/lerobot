@@ -15,6 +15,7 @@
 from .act.configuration_act import ACTConfig as ACTConfig
 from .diffusion.configuration_diffusion import DiffusionConfig as DiffusionConfig
 from .dit.configuration_dit import DiTConfig as DiTConfig
+from .dit_flow_mt.configuration_dit_flow_mt import DiTFlowMTConfig as DiTFlowMTConfig
 from .groot.configuration_groot import GrootConfig as GrootConfig
 from .pi0.configuration_pi0 import PI0Config as PI0Config
 from .pi0_fast.configuration_pi0_fast import PI0FastConfig as PI0FastConfig
@@ -30,6 +31,7 @@ __all__ = [
     "ACTConfig",
     "DiffusionConfig",
     "DiTConfig",
+    "DiTFlowMTConfig",
     "PI0Config",
     "PI05Config",
     "PI0FastConfig",
