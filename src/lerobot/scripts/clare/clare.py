@@ -310,6 +310,15 @@ def update_policy(
             discriminators_loss = []
             for peft_module in peft_modules:
                 for discriminator_id in range(peft_module.num_discriminators):
+                    if f"discriminator_{discriminator_id}" not in peft_module.info_dicts:
+                        logging.error(f"Missing discriminator_{discriminator_id} in info_dicts for {peft_module.layer_name}.{peft_module.layer_id}")
+                        logging.error(f"  info_dicts keys: {list(peft_module.info_dicts.keys())}")
+                        logging.error(f"  _train_discriminator={peft_module._train_discriminator} training={peft_module.training}")
+                        logging.error(f"  _forwarded_discriminator_id={peft_module._forwarded_discriminator_id}")
+                        logging.error(f"  num_discriminators={peft_module.num_discriminators}")
+                        logging.error(f"  clare_discriminators keys={list(peft_module.clare_discriminators.keys())}")
+                        if peft_module.adapter_name in peft_module.clare_discriminators:
+                            logging.error(f"  num disc modules={len(peft_module.clare_discriminators[peft_module.adapter_name])}")
                     discriminator_info_dict = peft_module.info_dicts[f"discriminator_{discriminator_id}"]
 
                     discriminator_running_mean = discriminator_info_dict["running_mean"]
@@ -791,16 +800,27 @@ def train_adapter(cfg: PEFTTrainPipelineConfig):
     accelerator.end_training()
 
 
-def train_discriminator(cfg: PEFTTrainPipelineConfig):
+def train_discriminator(cfg: PEFTTrainPipelineConfig, skip_expand: bool = False):
     """Phase 2: Train discriminators only (loads adapter checkpoint)."""
     (accelerator, device, dataset, eval_env, env_preprocessor, env_postprocessor,
      policy, peft_policy, peft_modules, peft_config, preprocessor, postprocessor, wandb_logger) = _setup_common(cfg)
 
-    # If not loading from adapter checkpoint, we need to expand layers first
-    # (this happens in "full" mode where train_adapter already ran)
-    adapter_params, discriminator_params, step = _expand_layers(
-        cfg, wandb_logger, policy, peft_modules, peft_config, dataset, preprocessor, accelerator
-    )
+    if skip_expand:
+        # In "full" mode, layers are already expanded — just collect existing discriminator params
+        step = 0
+        discriminator_params = []
+        for peft_module in peft_modules:
+            for disc in peft_module.clare_discriminators[peft_module.adapter_name]:
+                for p in disc.parameters():
+                    p.requires_grad = True
+                discriminator_params += list(disc.parameters())
+            # Set forwarded IDs to the last (current task's) adapter/discriminator
+            peft_module._forwarded_adapter_id = peft_module.num_adapters - 1
+            peft_module._forwarded_discriminator_id = peft_module.num_discriminators - 1
+    else:
+        adapter_params, discriminator_params, step = _expand_layers(
+            cfg, wandb_logger, policy, peft_modules, peft_config, dataset, preprocessor, accelerator
+        )
 
     # Create discriminator optimizer
     discriminator_optimizer = cfg.train_discriminator_optimizer.build(discriminator_params)
@@ -1098,7 +1118,12 @@ def train(cfg: PEFTTrainPipelineConfig):
         train_discriminator_only(cfg)
     else:  # "full" — original behavior
         train_adapter(cfg)
-        train_discriminator(cfg)
+        # Point cfg to the adapter checkpoint so train_discriminator loads trained weights
+        from pathlib import Path
+        adapter_ckpt = (Path(cfg.output_dir) / "checkpoints" / "last" / "adapter").resolve()
+        cfg.peft_weight_path = str(adapter_ckpt)
+        cfg.peft_cfg_path = None
+        train_discriminator(cfg, skip_expand=True)
 
 
 if __name__ == "__main__":
