@@ -255,18 +255,18 @@ def make_pre_post_processors(
             # Need to override both stats AND normalize_min_max since saved config might be empty
             preprocessor_overrides = {}
             postprocessor_overrides = {}
-            preprocessor_overrides["groot_pack_inputs_v3"] = {
-                "stats": kwargs.get("dataset_stats"),
-                "normalize_min_max": True,
-            }
-
-            # Also ensure postprocessing slices to env action dim and unnormalizes with dataset stats
+            groot_pre = {"normalize_min_max": True}
             env_action_dim = policy_cfg.output_features[ACTION].shape[0]
-            postprocessor_overrides["groot_action_unpack_unnormalize_v1"] = {
-                "stats": kwargs.get("dataset_stats"),
-                "normalize_min_max": True,
-                "env_action_dim": env_action_dim,
-            }
+            groot_post = {"normalize_min_max": True, "env_action_dim": env_action_dim}
+
+            # Only override stats if dataset_stats is provided (not when reusing pretrained stats)
+            ds_stats = kwargs.get("dataset_stats")
+            if ds_stats is not None:
+                groot_pre["stats"] = ds_stats
+                groot_post["stats"] = ds_stats
+
+            preprocessor_overrides["groot_pack_inputs_v3"] = groot_pre
+            postprocessor_overrides["groot_action_unpack_unnormalize_v1"] = groot_post
             kwargs["preprocessor_overrides"] = preprocessor_overrides
             kwargs["postprocessor_overrides"] = postprocessor_overrides
 

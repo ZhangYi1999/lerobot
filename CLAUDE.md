@@ -241,3 +241,36 @@ python -m lerobot.scripts.clare.clare --phase=discriminator_only \
 ```
 
 **Not yet verified**: End-to-end pipeline needs testing with actual LoRA checkpoints to validate key mapping and forward pass equivalence.
+
+### 10. Pretrained Normalization Stats Reuse (2026-03-19)
+
+**Problem**: When fine-tuning from a pretrained checkpoint across tasks (continual learning), normalization stats were always overridden with the current dataset's stats. This breaks scale consistency — the model was trained with one set of normalization stats but inference uses another.
+
+**Solution**: Added `reuse_pretrained_stats: bool = False` to `TrainPipelineConfig`. When enabled with a `pretrained_path`, the processor creation skips overriding normalization stats, allowing the pretrained checkpoint's saved stats (in `.safetensors` files) to be loaded automatically via the existing `load_state_dict` mechanism.
+
+**How it works** (no new mechanism needed):
+- `_NormalizationMixin.load_state_dict()` already checks `_stats_explicitly_provided`: if stats aren't passed in overrides, it loads from checkpoint's safetensors
+- For GROOT's `groot_pack_inputs_v3`: `dataset_stats` kwarg is omitted → stats loaded from checkpoint
+- Simply not passing `stats` in processor overrides achieves the desired behavior
+
+**Files modified**:
+
+| File | Change |
+|------|--------|
+| `src/lerobot/configs/train.py` | Added `reuse_pretrained_stats: bool = False` field |
+| `src/lerobot/scripts/lerobot_train.py` | Conditional stats in processor overrides |
+| `src/lerobot/policies/factory.py` | GROOT: only override stats if `dataset_stats` provided |
+| `src/lerobot/scripts/clare/clare.py` | Conditional stats in `_setup_common` |
+| `src/lerobot/scripts/clare/er.py` | Conditional stats |
+| `src/lerobot/scripts/clare/lora.py` | Conditional stats |
+| `src/lerobot/scripts/clare/packnet.py` | Conditional stats |
+| `src/lerobot/scripts/clare/ewc.py` | Conditional stats |
+
+**CLI usage**:
+```bash
+# Reuse pretrained normalization stats
+python -m lerobot.scripts.lerobot_train --policy.path=/checkpoint --reuse_pretrained_stats=true ...
+
+# CLARE with pretrained stats
+python -m lerobot.scripts.clare.clare --phase=adapter --policy.path=/checkpoint --reuse_pretrained_stats=true ...
+```

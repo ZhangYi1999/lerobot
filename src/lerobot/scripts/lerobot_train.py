@@ -258,34 +258,39 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     accelerator.wait_for_everyone()
 
     # Create processors - only provide dataset_stats if not resuming from saved processors
+    # When reuse_pretrained_stats is True, skip dataset stats so pretrained checkpoint stats are used
     processor_kwargs = {}
     postprocessor_kwargs = {}
     if (cfg.policy.pretrained_path and not cfg.resume) or not cfg.policy.pretrained_path:
-        # Only provide dataset_stats when not resuming from saved processor state
-        processor_kwargs["dataset_stats"] = dataset.meta.stats
+        if not cfg.reuse_pretrained_stats:
+            processor_kwargs["dataset_stats"] = dataset.meta.stats
 
     # For SARM, always provide dataset_meta for progress normalization
     if cfg.policy.type == "sarm":
         processor_kwargs["dataset_meta"] = dataset.meta
 
     if cfg.policy.pretrained_path is not None:
+        normalizer_override = {
+            "features": {**policy.config.input_features, **policy.config.output_features},
+            "norm_map": policy.config.normalization_mapping,
+        }
+        unnormalizer_override = {
+            "features": policy.config.output_features,
+            "norm_map": policy.config.normalization_mapping,
+        }
+        if not cfg.reuse_pretrained_stats:
+            normalizer_override["stats"] = dataset.meta.stats
+            unnormalizer_override["stats"] = dataset.meta.stats
+
         processor_kwargs["preprocessor_overrides"] = {
             "device_processor": {"device": device.type},
-            "normalizer_processor": {
-                "stats": dataset.meta.stats,
-                "features": {**policy.config.input_features, **policy.config.output_features},
-                "norm_map": policy.config.normalization_mapping,
-            },
+            "normalizer_processor": normalizer_override,
         }
         processor_kwargs["preprocessor_overrides"]["rename_observations_processor"] = {
             "rename_map": cfg.rename_map
         }
         postprocessor_kwargs["postprocessor_overrides"] = {
-            "unnormalizer_processor": {
-                "stats": dataset.meta.stats,
-                "features": policy.config.output_features,
-                "norm_map": policy.config.normalization_mapping,
-            },
+            "unnormalizer_processor": unnormalizer_override,
         }
 
     preprocessor, postprocessor = make_pre_post_processors(

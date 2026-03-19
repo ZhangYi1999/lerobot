@@ -74,6 +74,10 @@ class TrainPipelineConfig(HubMixin):
     rabc_epsilon: float = 1e-6  # Small constant for numerical stability
     rabc_head_mode: str | None = "sparse"  # For dual-head models: "sparse" or "dense"
 
+    # When True and pretrained_path is set, reuse normalization stats from the pretrained
+    # checkpoint instead of computing/using stats from the current dataset.
+    reuse_pretrained_stats: bool = False
+
     # Rename map for the observation to override the image and state keys
     rename_map: dict[str, str] = field(default_factory=dict)
     checkpoint_path: Path | None = field(init=False, default=None)
