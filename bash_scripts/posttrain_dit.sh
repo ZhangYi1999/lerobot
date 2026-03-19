@@ -12,9 +12,9 @@ SEEDS=(1000)
 
 DATASETS=(
     "real_0_put_bowl_filtered"
-    # "real_1_stack_bowls_filtered"
-    # "real_2_put_moka_pot_filtered"
-    # "real_3_close_drawer_filtered"
+    "real_1_stack_bowls_filtered"
+    "real_2_put_moka_pot_filtered"
+    "real_3_close_drawer_filtered"
 )
 
 # ===== Training Loop =====

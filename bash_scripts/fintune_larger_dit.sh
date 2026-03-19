@@ -3,8 +3,8 @@ set -e
 
 # ===== Configuration =====
 NUM_BLOCKS=12
-STEPS=10000
-SAVE_FREQ=5000
+STEPS=20000
+SAVE_FREQ=20000
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"  # Options: no, fp16, bf16
 
 SEEDS=(1000)

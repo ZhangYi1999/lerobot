@@ -3,19 +3,19 @@ set -e
 
 # ===== Configuration =====
 # Pretrained checkpoint from full fine-tune (local or HuggingFace Hub)
-PRETRAINED_PATH="outputs/train/dit_fft_pretraining_v1_s1000/checkpoints/last/pretrained_model"
+PRETRAINED_PATH="continuallearning/dit_fft_pretraining_v2_lerobot30_seed1000"
 LORA_CONFIG="dit_all"  # Options: dit_encoder, dit_decoder, dit_all
-STEPS=200
-SAVE_FREQ=200
+STEPS=20
+SAVE_FREQ=20
 LOG_FREQ=1
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"  # Options: no, fp16, bf16
 
 SEEDS=(1000)
 
 DATASETS=(
-    # "real_0_put_bowl_filtered"
+    "real_0_put_bowl_filtered"
     # "real_1_stack_bowls_filtered"
-    "real_2_put_moka_pot_filtered"
+    # "real_2_put_moka_pot_filtered"
     # "real_3_close_drawer_filtered"
 )
 
@@ -41,13 +41,13 @@ for DATASET in "${DATASETS[@]}"; do
 
         accelerate launch --mixed_precision=${MIXED_PRECISION} \
             -m lerobot.scripts.lerobot_train \
-            --job_name="dit_posttrainhalfv1_lora_${LORA_CONFIG}_${DATASET}_seed${SEED}_test" \
-            --output_dir="./outputs/train/dit_posttrainhalfv1_lora_${LORA_CONFIG}_${DATASET}_seed${SEED}_test" \
+            --job_name="dit_posttrainv2_lora_${LORA_CONFIG}_${DATASET}_seed${SEED}_test" \
+            --output_dir="./outputs/train/dit_posttrainv2_lora_${LORA_CONFIG}_${DATASET}_seed${SEED}_test" \
             --dataset.repo_id="continuallearning/${DATASET}" \
             --policy.type=dit \
             --policy.pretrained_path="${PRETRAINED_PATH}" \
             --policy.push_to_hub=true \
-            --policy.repo_id="continuallearning/dit_posttrainhalfv1_lora_${LORA_CONFIG}_${DATASET}_seed${SEED}_test" \
+            --policy.repo_id="continuallearning/dit_posttrainv2_lora_${LORA_CONFIG}_${DATASET}_seed${SEED}_test" \
             --batch_size=128 \
             --num_workers=16 \
             --steps=${STEPS} \
