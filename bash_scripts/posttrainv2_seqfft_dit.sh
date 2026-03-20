@@ -14,7 +14,7 @@ SEED=1000
 #   "pretrained" (default) — each task uses normalization from its own CHECKPOINTS[i]
 #   "first"                — task 0 loads from dataset; task 1+ reuse normalization from task 0's output checkpoint
 #   "union"                — all tasks use pre-computed union stats from NORM_STATS_FILE
-NORM_MODE="${NORM_MODE:-pretrained}"
+NORM_MODE="${NORM_MODE:-union}"
 NORM_STATS_FILE="${NORM_STATS_FILE:-configs/union_stats.json}"
 
 DATASETS=(
