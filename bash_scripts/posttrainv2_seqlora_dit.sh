@@ -10,6 +10,10 @@ export REUSE_PRETRAINED_NORMALIZATION="${REUSE_PRETRAINED_NORMALIZATION:-true}"
 START_TASK="${START_TASK:-1}"   # Set to resume from middle, e.g. START_TASK=1
 SEED=1000
 
+# LoRA adapter config and merge-back for SeqLoRA
+export PEFT_CONFIG_PATH="configs/lora/dit_all"
+export MERGE_LORA_ADAPTER=true
+
 # Normalization source control:
 #   "pretrained" (default) — each task uses normalization from its own CHECKPOINTS[i]
 #   "first"                — task 0 loads from dataset; task 1+ reuse normalization from task 0's output checkpoint
@@ -26,16 +30,13 @@ DATASETS=(
 
 # Pretrained checkpoint for each task (hub repo_id or local path).
 # CHECKPOINTS[i] is the starting checkpoint for DATASETS[i].
+# Because MERGE_LORA_ADAPTER=true, each checkpoint is a standard (merged) model.
 CHECKPOINTS=(
     "continuallearning/dit_fft_pretraining_v2_lerobot30_seed1000"
-    "continuallearning/dit_posttrainv2_seqfft_real_0_put_bowl_filtered_seed${SEED}"
-    "continuallearning/dit_posttrainv2_seqfft_real_1_stack_bowls_filtered_seed${SEED}"
-    "continuallearning/dit_posttrainv2_seqfft_real_2_put_moka_pot_filtered_seed${SEED}"
-    "continuallearning/dit_posttrainv2_seqfft_real_3_close_drawer_filtered_seed${SEED}"
-    # "outputs/train/dit_posttrainv2_seqfft_real_0_put_bowl_filtered_seed${SEED}/checkpoints/last/pretrained_model"
-    # "outputs/train/dit_posttrainv2_seqfft_real_1_stack_bowls_filtered_seed${SEED}/checkpoints/last/pretrained_model"
-    # "outputs/train/dit_posttrainv2_seqfft_real_2_put_moka_pot_filtered_seed${SEED}/checkpoints/last/pretrained_model"
-    # "outputs/train/dit_posttrainv2_seqfft_real_3_close_drawer_filtered_seed${SEED}/checkpoints/last/pretrained_model"
+    "continuallearning/dit_posttrainv2_seqlora_real_0_put_bowl_filtered_seed${SEED}"
+    "continuallearning/dit_posttrainv2_seqlora_real_1_stack_bowls_filtered_seed${SEED}"
+    "continuallearning/dit_posttrainv2_seqlora_real_2_put_moka_pot_filtered_seed${SEED}"
+    "continuallearning/dit_posttrainv2_seqlora_real_3_close_drawer_filtered_seed${SEED}"
 )
 
 # ===== Training Loop =====
@@ -46,7 +47,7 @@ for i in "${!DATASETS[@]}"; do
     fi
 
     DATASET="${DATASETS[$i]}"
-    REPO_ID="continuallearning/dit_posttrainv2_seqfft_${DATASET}_seed${SEED}"
+    REPO_ID="continuallearning/dit_posttrainv2_seqlora_${DATASET}_seed${SEED}"
     CURRENT_PRETRAINED="${CHECKPOINTS[$i]}"
 
     # ===== Normalization Source =====
@@ -60,7 +61,7 @@ for i in "${!DATASETS[@]}"; do
             unset NORM_CHECKPOINT_PATH
             echo "NORM_MODE=first, task 0: loading normalization from dataset"
         else
-            TASK0_REPO_ID="continuallearning/dit_posttrainv2_seqfft_${DATASETS[0]}_seed${SEED}"
+            TASK0_REPO_ID="continuallearning/dit_posttrainv2_seqlora_${DATASETS[0]}_seed${SEED}"
             export NORM_CHECKPOINT_PATH="${TASK0_REPO_ID}"
             echo "NORM_MODE=first, task ${i}: reusing normalization from ${TASK0_REPO_ID}"
         fi
@@ -73,7 +74,7 @@ for i in "${!DATASETS[@]}"; do
     JOB_NAME="${REPO_ID#continuallearning/}"
 
     echo "=========================================="
-    echo "SeqFFT DiT: ${DATASET} (task=${i}, seed=${SEED})"
+    echo "SeqLoRA DiT: ${DATASET} (task=${i}, seed=${SEED})"
     echo "  From: ${CURRENT_PRETRAINED}"
     echo "  To:   ${REPO_ID}"
     echo "=========================================="
@@ -100,4 +101,4 @@ for i in "${!DATASETS[@]}"; do
         --wandb.entity=470620104-technical-university-of-munich
 done
 
-echo "All SeqFFT DiT posttrain runs completed!"
+echo "All SeqLoRA DiT posttrain runs completed!"

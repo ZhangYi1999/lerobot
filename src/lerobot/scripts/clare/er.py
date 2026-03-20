@@ -67,6 +67,10 @@ from lerobot.utils.utils import (
 # Override: set env var REUSE_PRETRAINED_NORMALIZATION=false to use dataset stats instead.
 REUSE_PRETRAINED_NORMALIZATION: bool = os.environ.get("REUSE_PRETRAINED_NORMALIZATION", "true").lower() != "false"
 
+# When set, load normalizer stats from this JSON file (same format as meta/stats.json).
+# Takes priority over REUSE_PRETRAINED_NORMALIZATION.
+NORM_STATS_FILE: str | None = os.environ.get("NORM_STATS_FILE")
+
 
 @dataclass
 class ERTrainPipelineConfig(TrainPipelineConfig):
@@ -231,28 +235,38 @@ def train(cfg: ERTrainPipelineConfig):
     )
 
     # Create preprocessor/postprocessor
+    # Resolve normalization stats: NORM_STATS_FILE > dataset stats / pretrained stats
+    _norm_stats = None
+    if NORM_STATS_FILE:
+        import json
+        logging.info(f"Loading normalizer stats from NORM_STATS_FILE: {NORM_STATS_FILE}")
+        with open(NORM_STATS_FILE) as f:
+            _norm_stats = json.load(f)
+    elif not (cfg.policy.pretrained_path and REUSE_PRETRAINED_NORMALIZATION):
+        _norm_stats = dataset.meta.stats
+
     processor_kwargs = {}
     postprocessor_kwargs = {}
     if (cfg.policy.pretrained_path and not cfg.resume) or not cfg.policy.pretrained_path:
-        if not (cfg.policy.pretrained_path and REUSE_PRETRAINED_NORMALIZATION):
-            processor_kwargs["dataset_stats"] = dataset.meta.stats
+        if _norm_stats is not None:
+            processor_kwargs["dataset_stats"] = _norm_stats
     if cfg.policy.pretrained_path is not None:
         preprocessor_overrides = {
             "device_processor": {"device": device.type},
             "rename_observations_processor": {"rename_map": cfg.rename_map},
         }
-        if not REUSE_PRETRAINED_NORMALIZATION:
+        if _norm_stats is not None:
             preprocessor_overrides["normalizer_processor"] = {
-                "stats": dataset.meta.stats,
+                "stats": _norm_stats,
                 "features": {**policy.config.input_features, **policy.config.output_features},
                 "norm_map": policy.config.normalization_mapping,
             }
         processor_kwargs["preprocessor_overrides"] = preprocessor_overrides
 
         postprocessor_overrides = {}
-        if not REUSE_PRETRAINED_NORMALIZATION:
+        if _norm_stats is not None:
             postprocessor_overrides["unnormalizer_processor"] = {
-                "stats": dataset.meta.stats,
+                "stats": _norm_stats,
                 "features": policy.config.output_features,
                 "norm_map": policy.config.normalization_mapping,
             }

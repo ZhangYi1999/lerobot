@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 import dataclasses
 import logging
 import os
@@ -66,6 +67,18 @@ REUSE_PRETRAINED_NORMALIZATION: bool = os.environ.get("REUSE_PRETRAINED_NORMALIZ
 # normalization from the first (pretraining) checkpoint.
 # Example: export NORM_CHECKPOINT_PATH="continuallearning/my_pretrain"
 NORM_CHECKPOINT_PATH: str | None = os.environ.get("NORM_CHECKPOINT_PATH")
+
+# When set, load normalizer stats from this JSON file (same format as meta/stats.json).
+# Useful for continual learning with pre-computed union stats across all tasks.
+# Takes priority over NORM_CHECKPOINT_PATH.
+# Example: export NORM_STATS_FILE="union_stats.json"
+NORM_STATS_FILE: str | None = os.environ.get("NORM_STATS_FILE")
+
+# When set to true, merge LoRA adapter weights into the base model before saving.
+# This produces a standard (non-PEFT) checkpoint that can be loaded via --policy.pretrained_path.
+# Useful for SeqLoRA where each task's merged model becomes the next task's pretrained base.
+# Example: export MERGE_LORA_ADAPTER=true
+MERGE_LORA_ADAPTER: bool = os.environ.get("MERGE_LORA_ADAPTER", "false").lower() == "true"
 
 
 def _load_normalizer_stats_from_checkpoint(checkpoint_path: str) -> dict:
@@ -289,8 +302,18 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     processor_kwargs = {}
     postprocessor_kwargs = {}
     # Determine which normalization stats to use (None = keep pretrained checkpoint's own stats).
+    # Priority: NORM_STATS_FILE > NORM_CHECKPOINT_PATH > dataset stats / pretrained stats.
     _norm_stats = None
-    if NORM_CHECKPOINT_PATH:
+    if NORM_STATS_FILE:
+        # Load pre-computed stats from a JSON file (e.g. union stats across all tasks).
+        import json
+        if is_main_process:
+            logging.info(
+                f"Loading normalizer stats from NORM_STATS_FILE: {NORM_STATS_FILE}"
+            )
+        with open(NORM_STATS_FILE) as f:
+            _norm_stats = json.load(f)
+    elif NORM_CHECKPOINT_PATH:
         # Load stats from the explicitly specified checkpoint (e.g. always use task-0 stats).
         if is_main_process:
             logging.info(
@@ -512,16 +535,40 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             if is_main_process:
                 logging.info(f"Checkpoint policy after step {step}")
                 checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
-                save_checkpoint(
-                    checkpoint_dir=checkpoint_dir,
-                    step=step,
-                    cfg=cfg,
-                    policy=accelerator.unwrap_model(policy),
-                    optimizer=optimizer,
-                    scheduler=lr_scheduler,
-                    preprocessor=preprocessor,
-                    postprocessor=postprocessor,
-                )
+
+                unwrapped_policy = accelerator.unwrap_model(policy)
+                if MERGE_LORA_ADAPTER and cfg.peft is not None:
+                    logging.info("MERGE_LORA_ADAPTER: merging LoRA adapter into base model")
+                    # Save adapter weights separately for reference
+                    policy_copy = copy.deepcopy(unwrapped_policy)
+                    policy_copy.save_pretrained(str(checkpoint_dir / "adapter"))
+                    # Merge LoRA weights into base model
+                    merged_model = policy_copy.merge_and_unload()
+                    # Save as a standard (non-PEFT) checkpoint
+                    cfg_copy = copy.deepcopy(cfg)
+                    cfg_copy.peft = None
+                    save_checkpoint(
+                        checkpoint_dir=checkpoint_dir,
+                        step=step,
+                        cfg=cfg_copy,
+                        policy=merged_model,
+                        optimizer=optimizer,
+                        scheduler=lr_scheduler,
+                        preprocessor=preprocessor,
+                        postprocessor=postprocessor,
+                    )
+                    del policy_copy, merged_model, cfg_copy
+                else:
+                    save_checkpoint(
+                        checkpoint_dir=checkpoint_dir,
+                        step=step,
+                        cfg=cfg,
+                        policy=unwrapped_policy,
+                        optimizer=optimizer,
+                        scheduler=lr_scheduler,
+                        preprocessor=preprocessor,
+                        postprocessor=postprocessor,
+                    )
                 update_last_checkpoint(checkpoint_dir)
                 if wandb_logger:
                     wandb_logger.log_policy(checkpoint_dir)
@@ -588,7 +635,13 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
 
         if cfg.policy.push_to_hub:
             unwrapped_policy = accelerator.unwrap_model(policy)
-            if cfg.policy.use_peft:
+            if MERGE_LORA_ADAPTER and cfg.policy.use_peft:
+                logging.info("MERGE_LORA_ADAPTER: merging LoRA adapter before pushing to hub")
+                policy_copy = copy.deepcopy(unwrapped_policy)
+                merged_model = policy_copy.merge_and_unload()
+                merged_model.push_model_to_hub(cfg)
+                del policy_copy, merged_model
+            elif cfg.policy.use_peft:
                 unwrapped_policy.push_model_to_hub(cfg, peft_model=unwrapped_policy)
             else:
                 unwrapped_policy.push_model_to_hub(cfg)
