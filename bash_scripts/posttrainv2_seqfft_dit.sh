@@ -26,13 +26,13 @@ DATASETS=(
 # Pretrained checkpoint for each task (hub repo_id or local path).
 # CHECKPOINTS[i] is the starting checkpoint for DATASETS[i].
 CHECKPOINTS=(
-    "continuallearning/dit_fft_pretraining_v2_lerobot30_seed1000"
-    "continuallearning/dit_posttrainv2_real_0_put_bowl_filtered_seed1000"
-    "continuallearning/dit_posttrainv2_seqfft_real_1_stack_bowls_filtered_seed1000"
-    "continuallearning/dit_posttrainv2_seqfft_real_2_put_moka_pot_filtered_seed1000"
-    "continuallearning/dit_posttrainv2_seqfft_real_3_close_drawer_filtered_seed1000"
-    # "outputs/train/dit_posttrainv2_seqfft_real_1_stack_bowls_filtered_seed1000/checkpoints/last/pretrained_model"
-    # "outputs/train/dit_posttrainv2_seqfft_real_2_put_moka_pot_filtered_seed1000/checkpoints/last/pretrained_model"
+    "continuallearning/dit_fft_pretraining_v2_lerobot30_seed${SEED}"
+    "continuallearning/dit_posttrainv2_real_0_put_bowl_filtered_seed${SEED}"
+    "continuallearning/dit_posttrainv2_seqfft_real_1_stack_bowls_filtered_seed${SEED}"
+    "continuallearning/dit_posttrainv2_seqfft_real_2_put_moka_pot_filtered_seed${SEED}"
+    "continuallearning/dit_posttrainv2_seqfft_real_3_close_drawer_filtered_seed${SEED}"
+    # "outputs/train/dit_posttrainv2_seqfft_real_1_stack_bowls_filtered_seed${SEED}/checkpoints/last/pretrained_model"
+    # "outputs/train/dit_posttrainv2_seqfft_real_2_put_moka_pot_filtered_seed${SEED}/checkpoints/last/pretrained_model"
 )
 
 # Get output hub repo_id for a given task index and dataset name
