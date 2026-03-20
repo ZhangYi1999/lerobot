@@ -13,8 +13,9 @@ SEED=1000
 # Normalization source control:
 #   "pretrained" (default) — each task uses normalization from its own CHECKPOINTS[i]
 #   "first"                — task 0 loads from dataset; task 1+ reuse normalization from task 0's output checkpoint
-#   "union"                — all tasks use pre-computed union stats (set NORM_STATS_FILE)
+#   "union"                — all tasks use pre-computed union stats from NORM_STATS_FILE
 NORM_MODE="${NORM_MODE:-pretrained}"
+NORM_STATS_FILE="${NORM_STATS_FILE:-configs/union_stats.json}"
 
 DATASETS=(
     "real_0_put_bowl_filtered"
@@ -51,7 +52,7 @@ for i in "${!DATASETS[@]}"; do
 
     # ===== Normalization Source =====
     if [ "$NORM_MODE" = "union" ]; then
-        export NORM_STATS_FILE="${NORM_STATS_FILE:?Set NORM_STATS_FILE for union mode}"
+        export NORM_STATS_FILE="${NORM_STATS_FILE}"
         unset NORM_CHECKPOINT_PATH
         echo "NORM_MODE=union, task ${i}: using union stats from ${NORM_STATS_FILE}"
     elif [ "$NORM_MODE" = "first" ]; then
