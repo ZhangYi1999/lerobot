@@ -61,6 +61,29 @@ from lerobot.utils.utils import (
 # Override: set env var REUSE_PRETRAINED_NORMALIZATION=false to use dataset stats instead.
 REUSE_PRETRAINED_NORMALIZATION: bool = os.environ.get("REUSE_PRETRAINED_NORMALIZATION", "true").lower() != "false"
 
+# When set, load normalizer stats from this specific checkpoint path.
+# Useful for sequential fine-tuning where all tasks should share the
+# normalization from the first (pretraining) checkpoint.
+# Example: export NORM_CHECKPOINT_PATH="continuallearning/my_pretrain"
+NORM_CHECKPOINT_PATH: str | None = os.environ.get("NORM_CHECKPOINT_PATH")
+
+
+def _load_normalizer_stats_from_checkpoint(checkpoint_path: str) -> dict:
+    """Load normalization stats from a saved preprocessor checkpoint."""
+    from lerobot.processor.normalize_processor import NormalizerProcessorStep
+    from lerobot.processor.pipeline import DataProcessorPipeline
+
+    preprocessor = DataProcessorPipeline.from_pretrained(
+        pretrained_model_name_or_path=checkpoint_path,
+        config_filename="policy_preprocessor.json",
+    )
+    for step in preprocessor.steps:
+        if isinstance(step, NormalizerProcessorStep):
+            return step.stats
+    raise ValueError(
+        f"No normalizer_processor step found in checkpoint: {checkpoint_path}"
+    )
+
 
 def update_policy(
     train_metrics: MetricsTracker,
@@ -265,11 +288,24 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     # Create processors - only provide dataset_stats if not resuming from saved processors
     processor_kwargs = {}
     postprocessor_kwargs = {}
+    # Determine which normalization stats to use (None = keep pretrained checkpoint's own stats).
+    _norm_stats = None
+    if NORM_CHECKPOINT_PATH:
+        # Load stats from the explicitly specified checkpoint (e.g. always use task-0 stats).
+        if is_main_process:
+            logging.info(
+                f"Loading normalizer stats from NORM_CHECKPOINT_PATH: {NORM_CHECKPOINT_PATH}"
+            )
+        _norm_stats = _load_normalizer_stats_from_checkpoint(NORM_CHECKPOINT_PATH)
+    elif not (cfg.policy.pretrained_path and REUSE_PRETRAINED_NORMALIZATION):
+        # Recompute stats from the current dataset.
+        _norm_stats = dataset.meta.stats
+
     if (cfg.policy.pretrained_path and not cfg.resume) or not cfg.policy.pretrained_path:
         # Only provide dataset_stats when not resuming from saved processor state,
         # and not reusing pretrained checkpoint normalization stats.
-        if not (cfg.policy.pretrained_path and REUSE_PRETRAINED_NORMALIZATION):
-            processor_kwargs["dataset_stats"] = dataset.meta.stats
+        if _norm_stats is not None:
+            processor_kwargs["dataset_stats"] = _norm_stats
 
     # For SARM, always provide dataset_meta for progress normalization
     if cfg.policy.type == "sarm":
@@ -280,18 +316,21 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             "device_processor": {"device": device.type},
             "rename_observations_processor": {"rename_map": cfg.rename_map},
         }
-        if not REUSE_PRETRAINED_NORMALIZATION:
+        if _norm_stats is not None:
             preprocessor_overrides["normalizer_processor"] = {
-                "stats": dataset.meta.stats,
-                "features": {**policy.config.input_features, **policy.config.output_features},
+                "stats": _norm_stats,
+                "features": {
+                    **policy.config.input_features,
+                    **policy.config.output_features,
+                },
                 "norm_map": policy.config.normalization_mapping,
             }
         processor_kwargs["preprocessor_overrides"] = preprocessor_overrides
 
         postprocessor_overrides = {}
-        if not REUSE_PRETRAINED_NORMALIZATION:
+        if _norm_stats is not None:
             postprocessor_overrides["unnormalizer_processor"] = {
-                "stats": dataset.meta.stats,
+                "stats": _norm_stats,
                 "features": policy.config.output_features,
                 "norm_map": policy.config.normalization_mapping,
             }

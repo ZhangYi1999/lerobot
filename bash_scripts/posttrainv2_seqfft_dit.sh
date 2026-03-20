@@ -10,6 +10,11 @@ export REUSE_PRETRAINED_NORMALIZATION="${REUSE_PRETRAINED_NORMALIZATION:-true}"
 START_TASK="${START_TASK:-1}"   # Set to resume from middle, e.g. START_TASK=1
 SEED=1000
 
+# Normalization source control:
+#   "pretrained" (default) — each task uses normalization from its own CHECKPOINTS[i]
+#   "first"                — all tasks use normalization from CHECKPOINTS[0]
+NORM_MODE="${NORM_MODE:-pretrained}"
+
 DATASETS=(
     "real_0_put_bowl_filtered"
     "real_1_stack_bowls_filtered"
@@ -40,6 +45,14 @@ get_repo_id() {
         echo "continuallearning/dit_posttrainv2_seqfft_${dataset}_seed${SEED}"
     fi
 }
+
+# ===== Normalization Source =====
+if [ "$NORM_MODE" = "first" ]; then
+    export NORM_CHECKPOINT_PATH="${CHECKPOINTS[0]}"
+    echo "NORM_MODE=first: using normalization from ${CHECKPOINTS[0]}"
+else
+    unset NORM_CHECKPOINT_PATH
+fi
 
 # ===== Training Loop =====
 for i in "${!DATASETS[@]}"; do
