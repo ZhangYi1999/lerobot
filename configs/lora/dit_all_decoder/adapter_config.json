@@ -1,0 +1,20 @@
+{
+    "peft_type": "LORA",
+    "r": 32,
+    "lora_alpha": 32,
+    "lora_dropout": 0.0,
+    "bias": "none",
+    "task_type": null,
+    "target_modules": [
+        "cond_proj",
+        "mlp.linear1",
+        "mlp.linear2",
+        "attn_modulate.scale",
+        "attn_modulate.shift",
+        "attn_gate.scale",
+        "mlp_modulate.scale",
+        "mlp_modulate.shift",
+        "mlp_gate.scale"
+    ],
+    "modules_to_save": null
+}

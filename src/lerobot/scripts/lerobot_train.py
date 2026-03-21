@@ -81,6 +81,15 @@ NORM_STATS_FILE: str | None = os.environ.get("NORM_STATS_FILE")
 MERGE_LORA_ADAPTER: bool = os.environ.get("MERGE_LORA_ADAPTER", "false").lower() == "true"
 
 
+def _is_peft_model(model) -> bool:
+    """Check if a model is wrapped with PEFT (regardless of how it was configured)."""
+    try:
+        from peft import PeftModel
+        return isinstance(model, PeftModel)
+    except ImportError:
+        return False
+
+
 def _load_normalizer_stats_from_checkpoint(checkpoint_path: str) -> dict:
     """Load normalization stats from a saved preprocessor checkpoint."""
     from lerobot.processor.normalize_processor import NormalizerProcessorStep
@@ -537,13 +546,14 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                 checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
 
                 unwrapped_policy = accelerator.unwrap_model(policy)
-                if MERGE_LORA_ADAPTER and cfg.peft is not None:
+                if MERGE_LORA_ADAPTER and _is_peft_model(unwrapped_policy):
                     logging.info("MERGE_LORA_ADAPTER: merging LoRA adapter into base model")
                     # Save adapter weights separately for reference
                     policy_copy = copy.deepcopy(unwrapped_policy)
                     policy_copy.save_pretrained(str(checkpoint_dir / "adapter"))
                     # Merge LoRA weights into base model
                     merged_model = policy_copy.merge_and_unload()
+                    merged_model.config.use_peft = False
                     # Save as a standard (non-PEFT) checkpoint
                     cfg_copy = copy.deepcopy(cfg)
                     cfg_copy.peft = None
@@ -557,6 +567,9 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                         preprocessor=preprocessor,
                         postprocessor=postprocessor,
                     )
+                    # Explicitly re-save config to ensure 'type' discriminator is present
+                    from lerobot.utils.constants import PRETRAINED_MODEL_DIR
+                    merged_model.config.save_pretrained(checkpoint_dir / PRETRAINED_MODEL_DIR)
                     del policy_copy, merged_model, cfg_copy
                 else:
                     save_checkpoint(
@@ -635,13 +648,14 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
 
         if cfg.policy.push_to_hub:
             unwrapped_policy = accelerator.unwrap_model(policy)
-            if MERGE_LORA_ADAPTER and cfg.policy.use_peft:
+            if MERGE_LORA_ADAPTER and _is_peft_model(unwrapped_policy):
                 logging.info("MERGE_LORA_ADAPTER: merging LoRA adapter before pushing to hub")
                 policy_copy = copy.deepcopy(unwrapped_policy)
                 merged_model = policy_copy.merge_and_unload()
+                merged_model.config.use_peft = False
                 merged_model.push_model_to_hub(cfg)
                 del policy_copy, merged_model
-            elif cfg.policy.use_peft:
+            elif _is_peft_model(unwrapped_policy):
                 unwrapped_policy.push_model_to_hub(cfg, peft_model=unwrapped_policy)
             else:
                 unwrapped_policy.push_model_to_hub(cfg)

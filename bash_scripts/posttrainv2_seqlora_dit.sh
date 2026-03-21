@@ -2,12 +2,12 @@
 set -e
 
 # ===== Configuration =====
-STEPS=20000
-SAVE_FREQ=20000
+STEPS=40000
+SAVE_FREQ=40000
 LOG_FREQ=100
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 export REUSE_PRETRAINED_NORMALIZATION="${REUSE_PRETRAINED_NORMALIZATION:-true}"
-START_TASK="${START_TASK:-1}"   # Set to resume from middle, e.g. START_TASK=1
+START_TASK="${START_TASK:-0}"   # Set to resume from middle, e.g. START_TASK=1
 SEED=1000
 
 # LoRA adapter config and merge-back for SeqLoRA
@@ -89,7 +89,8 @@ for i in "${!DATASETS[@]}"; do
         --policy.pretrained_path="${CURRENT_PRETRAINED}" \
         --policy.push_to_hub=true \
         --policy.repo_id="${REPO_ID}" \
-        --batch_size=256 \
+        --policy.optimizer_lr=0.00014 \
+        --batch_size=128 \
         --num_workers=16 \
         --steps=${STEPS} \
         --seed=${SEED} \
