@@ -16,6 +16,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
+import torchvision
 from transformers import CLIPTextModel, CLIPTokenizer, AutoModel
 
 from lerobot.utils.constants import OBS_ENV_STATE, OBS_STATE, ACTION, OBS_IMAGES
@@ -143,10 +144,34 @@ class DINOv2Encoder(nn.Module):
 
         self.hidden_size = self._model.config.hidden_size
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        outputs = self._model(x)
-        cls_token = outputs.pooler_output # (B, 768)
+        self.crop_shape = config.crop_shape
+        self.crop_ratio = config.crop_ratio
+        self.crop_is_random = config.crop_is_random
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Resolve crop size: crop_shape > crop_ratio > no crop
+        if self.crop_shape is not None:
+            crop_H, crop_W = self.crop_shape
+        elif self.crop_ratio is not None:
+            _, _, H, W = x.shape
+            crop_H, crop_W = int(H * self.crop_ratio), int(W * self.crop_ratio)
+        else:
+            crop_H = None
+
+        if crop_H is not None:
+            if self.training and self.crop_is_random:
+                _, _, H, W = x.shape
+                x = torchvision.transforms.functional.crop(
+                    x,
+                    top=torch.randint(0, H - crop_H + 1, (1,)).item(),
+                    left=torch.randint(0, W - crop_W + 1, (1,)).item(),
+                    height=crop_H, width=crop_W,
+                )
+            else:
+                x = torchvision.transforms.functional.center_crop(x, [crop_H, crop_W])
+
+        outputs = self._model(x)
+        cls_token = outputs.pooler_output  # (B, 768)
         return cls_token
 
 
@@ -655,18 +680,25 @@ class DiTModel(nn.Module):
         self.language_embedding_projection = nn.Linear(
             self.language_encoder.hidden_size, config.hidden_dim
         )
+        if config.freeze_language_proj:
+            self.language_embedding_projection.requires_grad_(False)
 
         if self.config.image_features:
             self.pretrained_rgb_encoder = DINOv2Encoder(config)
             self.rgb_embedding_projection = nn.Linear(
                 self.pretrained_rgb_encoder.hidden_size, config.hidden_dim
             )
+            if config.freeze_vision_proj:
+                self.rgb_embedding_projection.requires_grad_(False)
 
         if config.use_encoder:
             # Token-based conditioning: all features projected to hidden_dim
             self.state_proj = nn.Linear(
                 self.config.robot_state_feature.shape[0], config.hidden_dim
             )
+            self.state_dropout = nn.Dropout(config.state_dropout)
+            if config.freeze_state_proj:
+                self.state_proj.requires_grad_(False)
             if self.config.env_state_feature:
                 self.env_state_proj = nn.Linear(
                     self.config.env_state_feature.shape[0], config.hidden_dim
@@ -679,6 +711,9 @@ class DiTModel(nn.Module):
                 self.state_proj = nn.Linear(
                     self.config.robot_state_feature.shape[0], config.hidden_dim
                 )
+                self.state_dropout = nn.Dropout(config.state_dropout)
+                if config.freeze_state_proj:
+                    self.state_proj.requires_grad_(False)
             else:
                 global_cond_dim = self.config.robot_state_feature.shape[0]
 
@@ -781,7 +816,7 @@ class DiTModel(nn.Module):
                 states = einops.rearrange(
                     batch[OBS_STATE], "b s ... -> (b s) ...", b=batch_size, s=n_obs_steps
                 )
-                states_embedding = self.state_proj(states)
+                states_embedding = self.state_dropout(self.state_proj(states))
                 states_feature = einops.rearrange(
                     states_embedding, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps
                 )
@@ -818,7 +853,7 @@ class DiTModel(nn.Module):
             states = einops.rearrange(
                 batch[OBS_STATE], "b s ... -> (b s) ...", b=batch_size, s=n_obs_steps
             )
-            states_emb = self.state_proj(states)
+            states_emb = self.state_dropout(self.state_proj(states))
             states_tokens = einops.rearrange(
                 states_emb, "(b s) d -> b s d", b=batch_size, s=n_obs_steps
             )

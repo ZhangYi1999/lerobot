@@ -109,6 +109,20 @@ class DiTConfig(PreTrainedConfig):
     # Vision backbone.
     vit_name: str = 'facebook/dinov2-base'
 
+    # Image crop (applied before DINOv2 encoder).
+    # crop_shape takes priority over crop_ratio; if neither is set, no crop.
+    crop_shape: tuple[int, int] | None = None
+    crop_ratio: float | None = 0.9
+    crop_is_random: bool = True
+
+    # Finetuning: freeze projection layers.
+    freeze_language_proj: bool = False
+    freeze_vision_proj: bool = False
+    freeze_state_proj: bool = False
+
+    # Finetuning: state regularization.
+    state_dropout: float = 0.1
+
     # Diffusion Transformer (DiT) parameters.
     frequency_embedding_dim: int = 256
     hidden_dim: int = 512
