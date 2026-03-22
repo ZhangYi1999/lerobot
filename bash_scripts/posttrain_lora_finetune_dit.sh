@@ -2,6 +2,8 @@
 set -e
 
 # ===== Configuration =====
+# Single-task LoRA fine-tuning: each task independently starts from the same pretrained checkpoint.
+PRETRAINED_PATH="continuallearning/dit_fft_pretraining_v2_lerobot30_seed1000"
 STEPS=40000
 SAVE_FREQ=40000
 LOG_FREQ=100
@@ -10,10 +12,9 @@ export REUSE_PRETRAINED_NORMALIZATION="${REUSE_PRETRAINED_NORMALIZATION:-true}"
 START_TASK="${START_TASK:-0}"   # Set to resume from middle, e.g. START_TASK=1
 SEED=1000
 
-# LoRA adapter config and merge-back
+# LoRA adapter config
 LORA_CONFIG="${LORA_CONFIG:-dit_all}"  # Options: dit_encoder, dit_decoder, dit_all, dit_all_decoder
 export PEFT_CONFIG_PATH="configs/lora/${LORA_CONFIG}"
-export MERGE_LORA_ADAPTER=true
 
 if [ ! -f "${PEFT_CONFIG_PATH}/adapter_config.json" ]; then
     echo "ERROR: adapter_config.json not found at ${PEFT_CONFIG_PATH}"
@@ -22,7 +23,7 @@ fi
 echo "Using LoRA config: ${PEFT_CONFIG_PATH}/adapter_config.json"
 
 # Normalization source control:
-#   "pretrained" (default) — each task uses normalization from its own CHECKPOINTS[i]
+#   "pretrained" (default) — each task uses normalization from its own pretrained checkpoint
 #   "first"                — task 0 loads from dataset; task 1+ reuse normalization from task 0's output checkpoint
 #   "union"                — all tasks use pre-computed union stats from NORM_STATS_FILE
 NORM_MODE="${NORM_MODE:-union}"
@@ -36,17 +37,6 @@ DATASETS=(
     "real_4_put_lego_into_drawer_filtered"
 )
 
-# Pretrained checkpoint for each task (hub repo_id or local path).
-# CHECKPOINTS[i] is the starting checkpoint for DATASETS[i].
-# Because MERGE_LORA_ADAPTER=true, each checkpoint is a standard (merged) model.
-CHECKPOINTS=(
-    "continuallearning/dit_fft_pretraining_v2_lerobot30_seed1000"
-    "continuallearning/dit_posttrainv2_lora_${LORA_CONFIG}_real_0_put_bowl_filtered_seed${SEED}"
-    "continuallearning/dit_posttrainv2_lora_${LORA_CONFIG}_real_1_stack_bowls_filtered_seed${SEED}"
-    "continuallearning/dit_posttrainv2_lora_${LORA_CONFIG}_real_2_put_moka_pot_filtered_seed${SEED}"
-    "continuallearning/dit_posttrainv2_lora_${LORA_CONFIG}_real_3_close_drawer_filtered_seed${SEED}"
-)
-
 # ===== Training Loop =====
 for i in "${!DATASETS[@]}"; do
     if [ "$i" -lt "$START_TASK" ]; then
@@ -56,7 +46,6 @@ for i in "${!DATASETS[@]}"; do
 
     DATASET="${DATASETS[$i]}"
     REPO_ID="continuallearning/dit_posttrainv2_lora_${LORA_CONFIG}_${DATASET}_seed${SEED}"
-    CURRENT_PRETRAINED="${CHECKPOINTS[$i]}"
 
     # ===== Normalization Source =====
     if [ "$NORM_MODE" = "union" ]; then
@@ -83,7 +72,7 @@ for i in "${!DATASETS[@]}"; do
 
     echo "=========================================="
     echo "LoRA (${LORA_CONFIG}) DiT: ${DATASET} (task=${i}, seed=${SEED})"
-    echo "  From: ${CURRENT_PRETRAINED}"
+    echo "  From: ${PRETRAINED_PATH}"
     echo "  To:   ${REPO_ID}"
     echo "=========================================="
 
@@ -93,7 +82,7 @@ for i in "${!DATASETS[@]}"; do
         --output_dir="./outputs/train/${JOB_NAME}" \
         --dataset.repo_id="continuallearning/${DATASET}" \
         --policy.type=dit \
-        --policy.pretrained_path="${CURRENT_PRETRAINED}" \
+        --policy.pretrained_path="${PRETRAINED_PATH}" \
         --policy.push_to_hub=true \
         --policy.repo_id="${REPO_ID}" \
         --policy.optimizer_lr=0.00014 \
@@ -110,4 +99,4 @@ for i in "${!DATASETS[@]}"; do
         --wandb.entity=470620104-technical-university-of-munich
 done
 
-echo "All LoRA DiT posttrain runs completed!"
+echo "All LoRA DiT single-task finetuning runs completed!"
