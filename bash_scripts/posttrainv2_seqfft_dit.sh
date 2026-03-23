@@ -98,7 +98,10 @@ for i in "${!DATASETS[@]}"; do
         --wandb.enable=true \
         --wandb.disable_artifact=true \
         --wandb.project=clare_rebuttal \
-        --wandb.entity=470620104-technical-university-of-munich
+        --wandb.entity=470620104-technical-university-of-munich \
+        --policy.freeze_language_proj=true \
+        --policy.freeze_vision_proj=true \
+        --policy.freeze_state_proj=true
 done
 
 echo "All SeqFFT DiT posttrain runs completed!"

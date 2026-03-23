@@ -118,6 +118,17 @@ def build_lora_to_clare_key_mapping(
     return mapping
 
 
+_CLARE_KEY_RE = re.compile(
+    r"^(?P<prefix>.+)\.clare_func_adapters\.default"
+    r"\.(?P<adapter_idx>\d+)"
+    r"\.layer_wise_lora_adapters\.(?P<sub_key>[^.]+)"
+    r"\.(?P<ab>lora_[ab])\.weight$"
+)
+
+# Map CLARE ab names to standard PEFT LoRA ab names
+_CLARE_AB_TO_LORA_AB = {"lora_a": "lora_A", "lora_b": "lora_B"}
+
+
 def map_lora_weights_to_clare(
     lora_sd: dict[str, torch.Tensor],
     clare_model_sd: dict[str, torch.Tensor],
@@ -126,10 +137,14 @@ def map_lora_weights_to_clare(
 ) -> dict[str, torch.Tensor]:
     """Map LoRA state dict keys to CLARE state dict keys and copy weights.
 
+    Instead of iterating CLARELayers and guessing LoRA keys, this directly
+    parses CLARE state dict keys to extract the module path and constructs
+    the exact corresponding LoRA key.
+
     Args:
-        lora_sd: Standard PEFT LoRA state dict (keys without base_model.model. prefix)
+        lora_sd: Standard PEFT LoRA state dict
         clare_model_sd: Current CLARE model state dict (full keys)
-        clare_layers: List of CLARELayer instances
+        clare_layers: List of CLARELayer instances (unused, kept for API compat)
         adapter_idx: Index of the adapter slot to fill
 
     Returns:
@@ -138,66 +153,51 @@ def map_lora_weights_to_clare(
     mapped_count = 0
     unmapped_lora_keys = set(lora_sd.keys())
 
-    for clare_layer in clare_layers:
-        for sub_name in clare_layer.lora_module_name_list:
-            sub_key = sub_name.replace(".", "_")
+    # Build a lookup set for fast LoRA key matching
+    lora_key_set = set(lora_sd.keys())
 
-            for lora_ab, clare_ab in [("lora_A", "lora_a"), ("lora_B", "lora_b")]:
-                # Find the matching LoRA key
-                if sub_name == "self":
-                    lora_suffix = f".{lora_ab}.default.weight"
-                else:
-                    lora_suffix = f".{sub_name}.{lora_ab}.default.weight"
+    for clare_key in list(clare_model_sd.keys()):
+        m = _CLARE_KEY_RE.match(clare_key)
+        if m is None:
+            continue
+        if int(m.group("adapter_idx")) != adapter_idx:
+            continue
 
-                # Search for matching LoRA key
-                lora_key = None
-                for k in lora_sd:
-                    if k.endswith(lora_suffix):
-                        # Verify this key corresponds to the right CLARE layer
-                        # by checking the module path matches
-                        lora_key = k
-                        break
+        prefix = m.group("prefix")       # e.g. base_model.model.policy.dit...scale
+        sub_key = m.group("sub_key")      # e.g. "self" or "fc1"
+        clare_ab = m.group("ab")          # "lora_a" or "lora_b"
+        lora_ab = _CLARE_AB_TO_LORA_AB[clare_ab]  # "lora_A" or "lora_B"
 
-                if lora_key is None:
-                    logging.warning(
-                        f"No LoRA key found for CLARELayer "
-                        f"{clare_layer.layer_name}.{clare_layer.layer_id} "
-                        f"sub_module={sub_name} {lora_ab}"
-                    )
-                    continue
+        # Reconstruct the LoRA key from the module path
+        if sub_key == "self":
+            # CLARELayer wraps a single nn.Linear directly
+            lora_key = f"{prefix}.{lora_ab}.default.weight"
+        else:
+            # CLARELayer wraps a parent module; sub_key uses _ instead of .
+            sub_name = sub_key.replace("_", ".")
+            lora_key = f"{prefix}.{sub_name}.{lora_ab}.default.weight"
 
-                # Find the matching CLARE key in the model state dict
-                clare_adapter_key = None
-                clare_pattern = (
-                    f".clare_func_adapters.default.{adapter_idx}"
-                    f".layer_wise_lora_adapters.{sub_key}.{clare_ab}.weight"
-                )
+        if lora_key not in lora_key_set:
+            logging.warning(
+                f"No LoRA key found for CLARE key {clare_key}\n"
+                f"  Expected LoRA key: {lora_key}"
+            )
+            continue
 
-                for k in clare_model_sd:
-                    if k.endswith(clare_pattern):
-                        clare_adapter_key = k
-                        break
+        # Verify shapes match
+        lora_weight = lora_sd[lora_key]
+        clare_weight = clare_model_sd[clare_key]
+        if lora_weight.shape != clare_weight.shape:
+            raise ValueError(
+                f"Shape mismatch: LoRA {lora_key} {lora_weight.shape} vs "
+                f"CLARE {clare_key} {clare_weight.shape}"
+            )
 
-                if clare_adapter_key is None:
-                    logging.warning(
-                        f"No CLARE key found matching pattern *{clare_pattern}"
-                    )
-                    continue
-
-                # Verify shapes match
-                lora_weight = lora_sd[lora_key]
-                clare_weight = clare_model_sd[clare_adapter_key]
-                if lora_weight.shape != clare_weight.shape:
-                    raise ValueError(
-                        f"Shape mismatch: LoRA {lora_key} {lora_weight.shape} vs "
-                        f"CLARE {clare_adapter_key} {clare_weight.shape}"
-                    )
-
-                # Copy weight
-                clare_model_sd[clare_adapter_key] = lora_weight.clone()
-                unmapped_lora_keys.discard(lora_key)
-                mapped_count += 1
-                logging.debug(f"  {lora_key} -> {clare_adapter_key}")
+        # Copy weight
+        clare_model_sd[clare_key] = lora_weight.clone()
+        unmapped_lora_keys.discard(lora_key)
+        mapped_count += 1
+        logging.debug(f"  {lora_key} -> {clare_key}")
 
     if unmapped_lora_keys:
         logging.warning(

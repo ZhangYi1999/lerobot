@@ -2,19 +2,22 @@
     "peft_type": "CLARE",
     "target_modules": [
         {
-            "pattern": "policy\\.dit\\.velocity_net\\.decoder\\.layers\\.(?P<layer_id>\\d+)\\.attn_modulate\\.scale",
-            "feature_dim": 512,
+            "pattern": "policy\\.dit\\.velocity_net\\.cond_proj",
+            "feature_dim": 2600,
             "out_feature_dim": 512,
             "batch_first": true,
             "use_trainable_copy": false,
             "discriminator_cfg": {
                 "type": "autoencoder",
-                "feature_dim": 512,
+                "feature_dim": 2600,
                 "hidden_dim": 256,
                 "batch_first": true,
                 "max_batches_tracked": 10000,
                 "use_momentum": true,
-                "momentum": 0.1
+                "momentum": 0.1,
+                "feature_fusion": true,
+                "num_tokens": 1,
+                "fused_feature_dim": 512
             },
             "func_adapter_cfg": {
                 "use_lora": true,
@@ -23,91 +26,7 @@
             }
         },
         {
-            "pattern": "policy\\.dit\\.velocity_net\\.decoder\\.layers\\.(?P<layer_id>\\d+)\\.attn_modulate\\.shift",
-            "feature_dim": 512,
-            "out_feature_dim": 512,
-            "batch_first": true,
-            "use_trainable_copy": false,
-            "discriminator_cfg": {
-                "type": "autoencoder",
-                "feature_dim": 512,
-                "hidden_dim": 256,
-                "batch_first": true,
-                "max_batches_tracked": 10000,
-                "use_momentum": true,
-                "momentum": 0.1
-            },
-            "func_adapter_cfg": {
-                "use_lora": true,
-                "lora_rank": 32,
-                "lora_alpha": 32
-            }
-        },
-        {
-            "pattern": "policy\\.dit\\.velocity_net\\.decoder\\.layers\\.(?P<layer_id>\\d+)\\.attn_gate\\.scale",
-            "feature_dim": 512,
-            "out_feature_dim": 512,
-            "batch_first": true,
-            "use_trainable_copy": false,
-            "discriminator_cfg": {
-                "type": "autoencoder",
-                "feature_dim": 512,
-                "hidden_dim": 256,
-                "batch_first": true,
-                "max_batches_tracked": 10000,
-                "use_momentum": true,
-                "momentum": 0.1
-            },
-            "func_adapter_cfg": {
-                "use_lora": true,
-                "lora_rank": 32,
-                "lora_alpha": 32
-            }
-        },
-        {
-            "pattern": "policy\\.dit\\.velocity_net\\.decoder\\.layers\\.(?P<layer_id>\\d+)\\.mlp_modulate\\.scale",
-            "feature_dim": 512,
-            "out_feature_dim": 512,
-            "batch_first": true,
-            "use_trainable_copy": false,
-            "discriminator_cfg": {
-                "type": "autoencoder",
-                "feature_dim": 512,
-                "hidden_dim": 256,
-                "batch_first": true,
-                "max_batches_tracked": 10000,
-                "use_momentum": true,
-                "momentum": 0.1
-            },
-            "func_adapter_cfg": {
-                "use_lora": true,
-                "lora_rank": 32,
-                "lora_alpha": 32
-            }
-        },
-        {
-            "pattern": "policy\\.dit\\.velocity_net\\.decoder\\.layers\\.(?P<layer_id>\\d+)\\.mlp_modulate\\.shift",
-            "feature_dim": 512,
-            "out_feature_dim": 512,
-            "batch_first": true,
-            "use_trainable_copy": false,
-            "discriminator_cfg": {
-                "type": "autoencoder",
-                "feature_dim": 512,
-                "hidden_dim": 256,
-                "batch_first": true,
-                "max_batches_tracked": 10000,
-                "use_momentum": true,
-                "momentum": 0.1
-            },
-            "func_adapter_cfg": {
-                "use_lora": true,
-                "lora_rank": 32,
-                "lora_alpha": 32
-            }
-        },
-        {
-            "pattern": "policy\\.dit\\.velocity_net\\.decoder\\.layers\\.(?P<layer_id>\\d+)\\.mlp_gate\\.scale",
+            "pattern": "policy\\.dit\\.velocity_net\\.decoder\\.layers\\.(?P<layer_id>\\d+)\\.(attn|mlp)_(modulate\\.(scale|shift)|gate\\.scale)",
             "feature_dim": 512,
             "out_feature_dim": 512,
             "batch_first": true,

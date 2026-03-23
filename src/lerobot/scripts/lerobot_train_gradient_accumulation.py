@@ -17,10 +17,13 @@ Semantics:
     - Total micro-batches = cfg.steps × gradient_accumulation_steps
     - Effective batch size = batch_size × num_processes × gradient_accumulation_steps
     - log_freq, save_freq, eval_freq all count optimizer steps
+    - Default gradient_accumulation_steps = 2 (override via accelerate config or CLI)
 """
 
+import copy
 import dataclasses
 import logging
+import os
 import time
 from contextlib import nullcontext
 from pprint import pformat
@@ -61,6 +64,22 @@ from lerobot.utils.utils import (
     init_logging,
     inside_slurm,
 )
+
+
+# When set to true, merge LoRA adapter weights into the base model before saving.
+# This produces a standard (non-PEFT) checkpoint that can be loaded via --policy.pretrained_path.
+# Useful for SeqLoRA where each task's merged model becomes the next task's pretrained base.
+# Example: export MERGE_LORA_ADAPTER=true
+MERGE_LORA_ADAPTER: bool = os.environ.get("MERGE_LORA_ADAPTER", "false").lower() == "true"
+
+
+def _is_peft_model(model) -> bool:
+    """Check if a model is wrapped with PEFT (regardless of how it was configured)."""
+    try:
+        from peft import PeftModel
+        return isinstance(model, PeftModel)
+    except ImportError:
+        return False
 
 
 def update_policy_accum(
@@ -145,6 +164,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             step_scheduler_with_optimizer=False,
             kwargs_handlers=[ddp_kwargs],
             cpu=force_cpu,
+            gradient_accumulation_steps=2,
         )
 
     grad_accum_steps = accelerator.gradient_accumulation_steps
@@ -400,16 +420,44 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             if is_main_process:
                 logging.info(f"Checkpoint policy after step {optimizer_step}")
                 checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, optimizer_step)
-                save_checkpoint(
-                    checkpoint_dir=checkpoint_dir,
-                    step=optimizer_step,
-                    cfg=cfg,
-                    policy=accelerator.unwrap_model(policy),
-                    optimizer=optimizer,
-                    scheduler=lr_scheduler,
-                    preprocessor=preprocessor,
-                    postprocessor=postprocessor,
-                )
+
+                unwrapped_policy = accelerator.unwrap_model(policy)
+                if MERGE_LORA_ADAPTER and _is_peft_model(unwrapped_policy):
+                    logging.info("MERGE_LORA_ADAPTER: merging LoRA adapter into base model")
+                    # Save adapter weights separately for reference
+                    policy_copy = copy.deepcopy(unwrapped_policy)
+                    policy_copy.save_pretrained(str(checkpoint_dir / "adapter"))
+                    # Merge LoRA weights into base model
+                    merged_model = policy_copy.merge_and_unload()
+                    merged_model.config.use_peft = False
+                    # Save as a standard (non-PEFT) checkpoint
+                    cfg_copy = copy.deepcopy(cfg)
+                    cfg_copy.peft = None
+                    save_checkpoint(
+                        checkpoint_dir=checkpoint_dir,
+                        step=optimizer_step,
+                        cfg=cfg_copy,
+                        policy=merged_model,
+                        optimizer=optimizer,
+                        scheduler=lr_scheduler,
+                        preprocessor=preprocessor,
+                        postprocessor=postprocessor,
+                    )
+                    # Explicitly re-save config to ensure 'type' discriminator is present
+                    from lerobot.utils.constants import PRETRAINED_MODEL_DIR
+                    merged_model.config.save_pretrained(checkpoint_dir / PRETRAINED_MODEL_DIR)
+                    del policy_copy, merged_model, cfg_copy
+                else:
+                    save_checkpoint(
+                        checkpoint_dir=checkpoint_dir,
+                        step=optimizer_step,
+                        cfg=cfg,
+                        policy=unwrapped_policy,
+                        optimizer=optimizer,
+                        scheduler=lr_scheduler,
+                        preprocessor=preprocessor,
+                        postprocessor=postprocessor,
+                    )
                 update_last_checkpoint(checkpoint_dir)
                 if wandb_logger:
                     wandb_logger.log_policy(checkpoint_dir)
@@ -468,7 +516,14 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         logging.info("End of training")
         if cfg.policy.push_to_hub:
             unwrapped_policy = accelerator.unwrap_model(policy)
-            if cfg.policy.use_peft:
+            if MERGE_LORA_ADAPTER and _is_peft_model(unwrapped_policy):
+                logging.info("MERGE_LORA_ADAPTER: merging LoRA adapter before pushing to hub")
+                policy_copy = copy.deepcopy(unwrapped_policy)
+                merged_model = policy_copy.merge_and_unload()
+                merged_model.config.use_peft = False
+                merged_model.push_model_to_hub(cfg)
+                del policy_copy, merged_model
+            elif _is_peft_model(unwrapped_policy):
                 unwrapped_policy.push_model_to_hub(cfg, peft_model=unwrapped_policy)
             else:
                 unwrapped_policy.push_model_to_hub(cfg)

@@ -281,7 +281,17 @@ class _DiTDecoder(nn.Module):
         self.mlp_modulate = _ShiftScaleMod(d_model)
         self.mlp_gate = _ZeroScaleMod(d_model)
 
+    def _set_routing_input(self, cond_only):
+        """Set condition-only (no timestep) as routing input on CLARE-wrapped modulate/gate layers."""
+        c_act = F.silu(cond_only)
+        for mod in (self.attn_modulate, self.attn_gate, self.mlp_modulate, self.mlp_gate):
+            for child in mod.children():
+                if hasattr(child, '_routing_input'):
+                    child._routing_input = c_act
+
     def forward(self, x, t, cond):
+        # set routing input before mixing in timestep (for CLARE discriminator routing)
+        self._set_routing_input(cond)
         # process the conditioning vector first
         cond = cond + t
 

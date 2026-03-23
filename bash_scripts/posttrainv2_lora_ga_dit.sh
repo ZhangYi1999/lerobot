@@ -2,20 +2,29 @@
 set -e
 
 # ===== Configuration =====
+# Single-task LoRA fine-tuning with gradient accumulation (ga=2, effective bs=256).
+PRETRAINED_PATH="continuallearning/dit_fft_pretraining_v2_lerobot30_seed1000"
 STEPS=40000
 SAVE_FREQ=40000
 LOG_FREQ=100
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 export REUSE_PRETRAINED_NORMALIZATION="${REUSE_PRETRAINED_NORMALIZATION:-true}"
-START_TASK="${START_TASK:-3}"   # Set to resume from middle, e.g. START_TASK=1
+export MERGE_LORA_ADAPTER="${MERGE_LORA_ADAPTER:-false}"
+START_TASK="${START_TASK:-0}"   # Set to resume from middle, e.g. START_TASK=1
 SEED=1000
 
-# LoRA adapter config and merge-back for SeqLoRA
-export PEFT_CONFIG_PATH="configs/lora/dit_all_decoder"
-export MERGE_LORA_ADAPTER=true
+# LoRA adapter config
+LORA_CONFIG="${LORA_CONFIG:-dit_all}"  # Options: dit_encoder, dit_decoder, dit_all, dit_all_decoder
+export PEFT_CONFIG_PATH="configs/lora/${LORA_CONFIG}"
+
+if [ ! -f "${PEFT_CONFIG_PATH}/adapter_config.json" ]; then
+    echo "ERROR: adapter_config.json not found at ${PEFT_CONFIG_PATH}"
+    exit 1
+fi
+echo "Using LoRA config: ${PEFT_CONFIG_PATH}/adapter_config.json"
 
 # Normalization source control:
-#   "pretrained" (default) — each task uses normalization from its own CHECKPOINTS[i]
+#   "pretrained" (default) — each task uses normalization from its own pretrained checkpoint
 #   "first"                — task 0 loads from dataset; task 1+ reuse normalization from task 0's output checkpoint
 #   "union"                — all tasks use pre-computed union stats from NORM_STATS_FILE
 NORM_MODE="${NORM_MODE:-union}"
@@ -29,17 +38,6 @@ DATASETS=(
     "real_4_put_lego_into_drawer_filtered"
 )
 
-# Pretrained checkpoint for each task (hub repo_id or local path).
-# CHECKPOINTS[i] is the starting checkpoint for DATASETS[i].
-# Because MERGE_LORA_ADAPTER=true, each checkpoint is a standard (merged) model.
-CHECKPOINTS=(
-    "continuallearning/dit_fft_pretraining_v2_lerobot30_seed1000"
-    "continuallearning/dit_posttrainv2_seqlora_dit_all_decoder_real_0_put_bowl_filtered_seed${SEED}"
-    "continuallearning/dit_posttrainv2_seqlora_dit_all_decoder_real_1_stack_bowls_filtered_seed${SEED}"
-    "continuallearning/dit_posttrainv2_seqlora_dit_all_decoder_real_2_put_moka_pot_filtered_seed${SEED}"
-    "continuallearning/dit_posttrainv2_seqlora_dit_all_decoder_real_3_close_drawer_filtered_seed${SEED}"
-)
-
 # ===== Training Loop =====
 for i in "${!DATASETS[@]}"; do
     if [ "$i" -lt "$START_TASK" ]; then
@@ -48,8 +46,7 @@ for i in "${!DATASETS[@]}"; do
     fi
 
     DATASET="${DATASETS[$i]}"
-    REPO_ID="continuallearning/dit_posttrainv2_seqlora_dit_all_decoder_${DATASET}_seed${SEED}"
-    CURRENT_PRETRAINED="${CHECKPOINTS[$i]}"
+    REPO_ID="continuallearning/dit_posttrainv2_baseline_lora_ga_${LORA_CONFIG}_${DATASET}_seed${SEED}"
 
     # ===== Normalization Source =====
     if [ "$NORM_MODE" = "union" ]; then
@@ -62,7 +59,7 @@ for i in "${!DATASETS[@]}"; do
             unset NORM_CHECKPOINT_PATH
             echo "NORM_MODE=first, task 0: loading normalization from dataset"
         else
-            TASK0_REPO_ID="continuallearning/dit_posttrainv2_seqlora_dit_all_decoder_${DATASETS[0]}_seed${SEED}"
+            TASK0_REPO_ID="continuallearning/dit_posttrainv2_baseline_lora_ga_${LORA_CONFIG}_${DATASETS[0]}_seed${SEED}"
             export NORM_CHECKPOINT_PATH="${TASK0_REPO_ID}"
             echo "NORM_MODE=first, task ${i}: reusing normalization from ${TASK0_REPO_ID}"
         fi
@@ -75,21 +72,22 @@ for i in "${!DATASETS[@]}"; do
     JOB_NAME="${REPO_ID#continuallearning/}"
 
     echo "=========================================="
-    echo "SeqLoRA DiT: ${DATASET} (task=${i}, seed=${SEED})"
-    echo "  From: ${CURRENT_PRETRAINED}"
+    echo "LoRA+GA (${LORA_CONFIG}) DiT: ${DATASET} (task=${i}, seed=${SEED})"
+    echo "  From: ${PRETRAINED_PATH}"
     echo "  To:   ${REPO_ID}"
+    echo "  Effective BS: 128 x 2 (ga) = 256"
     echo "=========================================="
 
     accelerate launch --mixed_precision=${MIXED_PRECISION} \
-        -m lerobot.scripts.lerobot_train \
+        -m lerobot.scripts.lerobot_train_gradient_accumulation \
         --job_name="${JOB_NAME}" \
         --output_dir="./outputs/train/${JOB_NAME}" \
         --dataset.repo_id="continuallearning/${DATASET}" \
         --policy.type=dit \
-        --policy.pretrained_path="${CURRENT_PRETRAINED}" \
+        --policy.pretrained_path="${PRETRAINED_PATH}" \
         --policy.push_to_hub=true \
         --policy.repo_id="${REPO_ID}" \
-        --policy.optimizer_lr=0.00014 \
+        --policy.optimizer_lr=0.0002 \
         --batch_size=128 \
         --num_workers=16 \
         --steps=${STEPS} \
@@ -103,4 +101,4 @@ for i in "${!DATASETS[@]}"; do
         --wandb.entity=470620104-technical-university-of-munich
 done
 
-echo "All SeqLoRA DiT posttrain runs completed!"
+echo "All LoRA+GA DiT single-task finetuning runs completed!"
