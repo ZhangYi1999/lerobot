@@ -184,12 +184,12 @@ class ImageTransformsConfig:
             "brightness": ImageTransformConfig(
                 weight=1.0,
                 type="ColorJitter",
-                kwargs={"brightness": (0.8, 1.2)},
+                kwargs={"brightness": (0.5, 1.5)},
             ),
             "contrast": ImageTransformConfig(
                 weight=1.0,
                 type="ColorJitter",
-                kwargs={"contrast": (0.8, 1.2)},
+                kwargs={"contrast": (0.5, 1.5)},
             ),
             "saturation": ImageTransformConfig(
                 weight=1.0,
