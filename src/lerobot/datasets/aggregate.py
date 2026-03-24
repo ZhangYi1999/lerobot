@@ -44,6 +44,17 @@ from lerobot.datasets.utils import (
 from lerobot.datasets.video_utils import concatenate_video_files, get_video_duration_in_s
 
 
+def _normalize_features(features: dict) -> dict:
+    """Normalize features for comparison by removing optional metadata keys like 'fps'."""
+    normalized = {}
+    for key, val in features.items():
+        if isinstance(val, dict):
+            normalized[key] = {k: v for k, v in val.items() if k != "fps"}
+        else:
+            normalized[key] = val
+    return normalized
+
+
 def validate_all_metadata(all_metadata: list[LeRobotDatasetMetadata]):
     """Validates that all dataset metadata have consistent properties.
 
@@ -64,6 +75,7 @@ def validate_all_metadata(all_metadata: list[LeRobotDatasetMetadata]):
     fps = all_metadata[0].fps
     robot_type = all_metadata[0].robot_type
     features = all_metadata[0].features
+    norm_features = _normalize_features(features)
 
     for meta in tqdm.tqdm(all_metadata, desc="Validate all meta data"):
         if fps != meta.fps:
@@ -72,7 +84,7 @@ def validate_all_metadata(all_metadata: list[LeRobotDatasetMetadata]):
             raise ValueError(
                 f"Same robot_type is expected, but got robot_type={meta.robot_type} instead of {robot_type}."
             )
-        if features != meta.features:
+        if norm_features != _normalize_features(meta.features):
             raise ValueError(
                 f"Same features is expected, but got features={meta.features} instead of {features}."
             )
@@ -622,6 +634,34 @@ def append_or_create_parquet_file(
     return idx, (dst_chunk, dst_file)
 
 
+def _harmonize_episode_parquets(aggr_root: Path):
+    """Ensure all episode parquet files have a consistent schema.
+
+    Source datasets may have different episode schemas (e.g. some include quantile
+    stats columns while others don't). This re-reads all files, concatenates them
+    (which handles column union and type coercion), and rewrites as a single file.
+    """
+    episodes_dir = aggr_root / "meta" / "episodes"
+    parquet_files = sorted(episodes_dir.rglob("*.parquet"))
+    if len(parquet_files) <= 1:
+        return
+
+    dfs = [pd.read_parquet(p) for p in parquet_files]
+    all_columns = [set(df.columns) for df in dfs]
+    if all(cols == all_columns[0] for cols in all_columns):
+        return
+
+    logging.info("Harmonizing episode parquet schemas across files")
+    merged = pd.concat(dfs, ignore_index=True)
+
+    # Remove old files and write single harmonized file
+    for p in parquet_files:
+        p.unlink()
+    out_path = episodes_dir / "chunk-000" / "file-000.parquet"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    merged.to_parquet(out_path)
+
+
 def finalize_aggregation(aggr_meta, all_metadata):
     """Finalizes the dataset aggregation by writing summary files and statistics.
 
@@ -632,6 +672,8 @@ def finalize_aggregation(aggr_meta, all_metadata):
         aggr_meta: Aggregated dataset metadata.
         all_metadata: List of all source dataset metadata objects.
     """
+    _harmonize_episode_parquets(aggr_meta.root)
+
     logging.info("write tasks")
     write_tasks(aggr_meta.tasks, aggr_meta.root)
 
