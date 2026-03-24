@@ -8,52 +8,41 @@ set -e
 # ==============================================================================
 
 # ===== Configuration =====
-PRETRAINED_PATH="outputs/train/dit_fft_pretraining_v1_s1000/checkpoints/last/pretrained_model"
+PRETRAINED_PATH="continuallearning/dit_fft_pretraining_v2_lerobot30_seed1000"
 CLARE_CONFIG_PATH="configs/peft/clare_dit"
-BASE_OUTPUT="outputs/lora_to_clare"
+OUTPUT_DIR="outputs/lora_to_clare/clare_converted_v2"
 export REUSE_PRETRAINED_NORMALIZATION="${REUSE_PRETRAINED_NORMALIZATION:-true}"
 
-DATASETS=(
-    "real_0_put_bowl_filtered"
-    "real_1_stack_bowls_filtered"
-    # "real_2_put_moka_pot_filtered"
-    # "real_3_close_drawer_filtered"
+LORA_REPOS=(
+    "continuallearning/dit_posttrainv2_baseline_lora_dit_all_real_0_put_bowl_filtered_seed1000"
+    "continuallearning/dit_posttrainv2_baseline_lora_dit_all_real_1_stack_bowls_filtered_seed1000"
+    "continuallearning/dit_posttrainv2_baseline_lora_dit_all_real_2_put_moka_pot_filtered_seed1000"
+    "continuallearning/dit_posttrainv2_baseline_lora_dit_all_real_3_close_drawer_filtered_seed1000"
+    "continuallearning/dit_posttrainv2_baseline_lora_dit_all_real_4_put_lego_into_drawer_filtered_seed1000"
 )
 
-# ===== Build list of LoRA checkpoint dirs =====
-LORA_CHECKPOINT_DIRS=""
-for i in "${!DATASETS[@]}"; do
-    DATASET="${DATASETS[$i]}"
-    LORA_DIR="${BASE_OUTPUT}/lora/task_${i}_${DATASET}/checkpoints/last/adapter"
-    if [ ! -d "${LORA_DIR}" ]; then
-        echo "ERROR: LoRA checkpoint not found at ${LORA_DIR}"
-        echo "  Run LoRA training first (e.g., lora_finetune_dit.sh per task)"
-        exit 1
-    fi
-    LORA_CHECKPOINT_DIRS="${LORA_CHECKPOINT_DIRS} ${LORA_DIR}"
-done
-
-N_TASKS=${#DATASETS[@]}
-CLARE_OUTPUT="${BASE_OUTPUT}/clare_converted"
+N_TASKS=${#LORA_REPOS[@]}
 
 echo "=========================================="
 echo "Convert LoRA → CLARE"
 echo "  Tasks:        ${N_TASKS}"
+echo "  Pretrained:   ${PRETRAINED_PATH}"
 echo "  CLARE config: ${CLARE_CONFIG_PATH}"
-echo "  Output:       ${CLARE_OUTPUT}"
+echo "  Output:       ${OUTPUT_DIR}"
 echo "=========================================="
 
-# Use the first dataset just for metadata (ds_meta)
+LORA_JSON=$(printf '%s' '['; sep=''; for r in "${LORA_REPOS[@]}"; do printf '%s"%s"' "$sep" "$r"; sep=','; done; printf ']')
+
 python -m lerobot.scripts.clare.convert_lora_to_clare \
-    --lora_checkpoint_dirs ${LORA_CHECKPOINT_DIRS} \
+    --lora_checkpoint_dirs="${LORA_JSON}" \
     --clare_config_path="${CLARE_CONFIG_PATH}" \
-    --output_dir="${CLARE_OUTPUT}" \
+    --output_dir="${OUTPUT_DIR}" \
     --policy.type=dit \
     --policy.pretrained_path="${PRETRAINED_PATH}" \
     --policy.push_to_hub=false \
-    --dataset.repo_id="continuallearning/${DATASETS[0]}" \
+    --dataset.repo_id="continuallearning/real_0_put_bowl_filtered" \
     --eval_freq=0
 
 echo ""
-echo "Conversion complete: ${CLARE_OUTPUT}"
+echo "Conversion complete: ${OUTPUT_DIR}"
 echo "Next: run clare_finetune_dit.sh to train discriminators"

@@ -24,6 +24,8 @@ from typing import Optional
 import torch
 from safetensors.torch import load_file as load_safetensors
 
+from huggingface_hub import snapshot_download
+
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.datasets.factory import make_dataset
@@ -32,12 +34,6 @@ from lerobot.utils.utils import init_logging
 
 from peft import get_peft_model, PeftConfig
 from peft.mapping import PEFT_TYPE_TO_PREFIX_MAPPING
-
-
-class PeftWrapperPolicy(torch.nn.Module):
-    def __init__(self, policy):
-        super().__init__()
-        self.policy = policy
 
 
 @dataclass
@@ -168,19 +164,34 @@ def map_lora_weights_to_clare(
         clare_ab = m.group("ab")          # "lora_a" or "lora_b"
         lora_ab = _CLARE_AB_TO_LORA_AB[clare_ab]  # "lora_A" or "lora_B"
 
-        # Reconstruct the LoRA key from the module path
+        # Reconstruct the LoRA key from the module path.
+        # Try multiple key formats to handle different LoRA saving
+        # conventions (with/without "policy." prefix, with/without
+        # ".default" adapter name).
         if sub_key == "self":
-            # CLARELayer wraps a single nn.Linear directly
-            lora_key = f"{prefix}.{lora_ab}.default.weight"
+            suffixes = [
+                f"{lora_ab}.default.weight",
+                f"{lora_ab}.weight",
+            ]
         else:
-            # CLARELayer wraps a parent module; sub_key uses _ instead of .
             sub_name = sub_key.replace("_", ".")
-            lora_key = f"{prefix}.{sub_name}.{lora_ab}.default.weight"
+            suffixes = [
+                f"{sub_name}.{lora_ab}.default.weight",
+                f"{sub_name}.{lora_ab}.weight",
+            ]
 
-        if lora_key not in lora_key_set:
+        # Try matching with the prefix directly
+        lora_key = None
+        for sfx in suffixes:
+            candidate = f"{prefix}.{sfx}"
+            if candidate in lora_key_set:
+                lora_key = candidate
+                break
+
+        if lora_key is None:
             logging.warning(
                 f"No LoRA key found for CLARE key {clare_key}\n"
-                f"  Expected LoRA key: {lora_key}"
+                f"  Tried prefix: {prefix}"
             )
             continue
 
@@ -217,9 +228,19 @@ def convert(cfg: ConvertConfig):
     if not cfg.clare_config_path:
         raise ValueError("--clare_config_path must be specified")
 
-    lora_dirs = [Path(d) for d in cfg.lora_checkpoint_dirs]
+    lora_dirs = []
+    for d in cfg.lora_checkpoint_dirs:
+        p = Path(d)
+        if p.is_dir():
+            lora_dirs.append(p)
+        else:
+            logging.info(f"Downloading LoRA from Hub: {d}")
+            local_path = snapshot_download(repo_id=d)
+            lora_dirs.append(Path(local_path))
     n_tasks = len(lora_dirs)
-    logging.info(f"Converting {n_tasks} LoRA checkpoints to CLARE format")
+    logging.info(
+        f"Converting {n_tasks} LoRA checkpoints to CLARE format"
+    )
 
     # Validate all checkpoint dirs exist
     for d in lora_dirs:
@@ -233,11 +254,10 @@ def convert(cfg: ConvertConfig):
 
     # ---- Step 2: Create CLARE model shell ----
     logging.info(f"Creating CLARE model from config: {cfg.clare_config_path}")
-    peft_wrapper_policy = PeftWrapperPolicy(policy=policy)
 
     clare_peft_cfg = PeftConfig.from_pretrained(cfg.clare_config_path)
     clare_peft_cfg.inference_mode = False
-    peft_policy = get_peft_model(peft_wrapper_policy, clare_peft_cfg)
+    peft_policy = get_peft_model(policy, clare_peft_cfg)
     peft_config = peft_policy.peft_config["default"]
 
     clare_layers = peft_policy.base_model.adapter_layers
