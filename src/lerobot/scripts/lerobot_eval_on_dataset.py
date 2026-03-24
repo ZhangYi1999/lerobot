@@ -47,6 +47,7 @@ import json
 import logging
 import math
 import os
+import random
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -56,6 +57,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from termcolor import colored
 from tqdm import tqdm
@@ -71,6 +73,64 @@ from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.random_utils import set_seed
 from lerobot.utils.utils import get_safe_torch_device, init_logging
 
+# Normalization override env vars (same semantics as lerobot_train.py).
+# Priority: NORM_STATS_FILE > NORM_CHECKPOINT_PATH > pretrained/dataset stats.
+REUSE_PRETRAINED_NORMALIZATION: bool = os.environ.get(
+    "REUSE_PRETRAINED_NORMALIZATION", "true"
+).lower() != "false"
+NORM_CHECKPOINT_PATH: str | None = os.environ.get("NORM_CHECKPOINT_PATH")
+NORM_STATS_FILE: str | None = os.environ.get("NORM_STATS_FILE")
+
+
+def _load_normalizer_stats_from_checkpoint(checkpoint_path: str) -> dict:
+    """Load normalization stats from a saved preprocessor checkpoint."""
+    from lerobot.processor.normalize_processor import NormalizerProcessorStep
+    from lerobot.processor.pipeline import DataProcessorPipeline
+
+    preprocessor = DataProcessorPipeline.from_pretrained(
+        pretrained_model_name_or_path=checkpoint_path,
+        config_filename="policy_preprocessor.json",
+    )
+    for step in preprocessor.steps:
+        if isinstance(step, NormalizerProcessorStep):
+            return step.stats
+    raise ValueError(
+        f"No normalizer_processor step found in checkpoint: {checkpoint_path}"
+    )
+
+
+def parse_episodes(spec: str, total: int) -> list[int]:
+    """Parse an episode specification string into a list of episode indices.
+
+    Supported formats:
+        "all"       → all episodes [0, total)
+        "random"    → all episodes in random order
+        "random:5"  → 5 random episodes
+        "0,1,2"     → explicit list
+        "0-10"      → range [0, 10]
+        "0-10,15,20-25" → mixed
+    """
+    spec = spec.strip()
+    if spec == "all" or spec == "":
+        return list(range(total))
+    if spec.startswith("random"):
+        indices = list(range(total))
+        random.shuffle(indices)
+        if ":" in spec:
+            n = int(spec.split(":")[1])
+            indices = indices[:n]
+        return indices
+
+    indices = []
+    for part in spec.split(","):
+        part = part.strip()
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            indices.extend(range(int(lo), int(hi) + 1))
+        else:
+            indices.append(int(part))
+    return [i for i in indices if 0 <= i < total]
+
 
 @dataclass
 class EvalOnDatasetConfig:
@@ -79,6 +139,7 @@ class EvalOnDatasetConfig:
     output_dir: Path | None = None
     job_name: str | None = None
     seed: int | None = 1000
+    episodes: str = "all"
     wandb: WandBConfig = field(default_factory=WandBConfig)
     rename_map: dict[str, str] = field(default_factory=dict)
     tolerance_s: float = 1e-4
@@ -153,24 +214,52 @@ def load_policy_and_processors(cfg: EvalOnDatasetConfig, dataset: LeRobotDataset
                     peft_model = module
                     break
             if peft_model is not None:
-                from peft import set_peft_model_state_dict
                 from safetensors.torch import load_file
 
                 adapter_file = Path(peft_weight_path) / "adapter_model.safetensors"
                 if adapter_file.exists():
                     state_dict = load_file(str(adapter_file))
-                    set_peft_model_state_dict(peft_model, state_dict)
+                    # Load directly into the PeftModel. We bypass set_peft_model_state_dict
+                    # because CLARE uses nn.ModuleDict({adapter_name: ModuleList}) which
+                    # keeps the adapter name ("default") as part of the module hierarchy.
+                    # The generic PEFT save path (remove_adapter_name) is a no-op for these
+                    # keys, but the generic load path (_insert_adapter_name_into_state_dict)
+                    # erroneously duplicates "default", causing all keys to be silently
+                    # dropped by load_state_dict(strict=False).
+                    load_result = peft_model.load_state_dict(state_dict, strict=False)
+                    missing_clare = [k for k in load_result.missing_keys if "clare_" in k]
+                    if missing_clare:
+                        logging.warning(f"Missing CLARE keys after load: {missing_clare[:5]}...")
+                    if load_result.unexpected_keys:
+                        logging.warning(f"Unexpected keys after load: {load_result.unexpected_keys[:5]}...")
                     logging.info("PEFT weights loaded successfully.")
                 else:
                     logging.warning(f"No adapter_model.safetensors found at {peft_weight_path}")
 
     policy.eval()
 
+    # Determine normalization stats.
+    # Priority: NORM_STATS_FILE > NORM_CHECKPOINT_PATH > pretrained/dataset stats.
+    _norm_stats = None
+    if NORM_STATS_FILE:
+        logging.info(f"Loading normalizer stats from NORM_STATS_FILE: {NORM_STATS_FILE}")
+        with open(NORM_STATS_FILE) as f:
+            _norm_stats = json.load(f)
+    elif NORM_CHECKPOINT_PATH:
+        logging.info(f"Loading normalizer stats from NORM_CHECKPOINT_PATH: {NORM_CHECKPOINT_PATH}")
+        _norm_stats = _load_normalizer_stats_from_checkpoint(NORM_CHECKPOINT_PATH)
+    elif not (cfg.policy.pretrained_path and REUSE_PRETRAINED_NORMALIZATION):
+        _norm_stats = dataset.meta.stats
+
+    # When _norm_stats is None the pretrained checkpoint's own stats are preserved
+    # (no override passed to make_pre_post_processors).
+    norm_stats = _norm_stats if _norm_stats is not None else dataset.meta.stats
+
     device = str(policy.config.device)
     preprocessor_overrides = {
         "device_processor": {"device": device},
         "normalizer_processor": {
-            "stats": dataset.meta.stats,
+            "stats": norm_stats,
             "features": {**policy.config.input_features, **policy.config.output_features},
             "norm_map": policy.config.normalization_mapping,
         },
@@ -178,7 +267,7 @@ def load_policy_and_processors(cfg: EvalOnDatasetConfig, dataset: LeRobotDataset
     }
     postprocessor_overrides = {
         "unnormalizer_processor": {
-            "stats": dataset.meta.stats,
+            "stats": norm_stats,
             "features": policy.config.output_features,
             "norm_map": policy.config.normalization_mapping,
         },
@@ -187,7 +276,7 @@ def load_policy_and_processors(cfg: EvalOnDatasetConfig, dataset: LeRobotDataset
     preprocessor, postprocessor = make_pre_post_processors(
         policy_cfg=cfg.policy,
         pretrained_path=cfg.policy.pretrained_path,
-        dataset_stats=dataset.meta.stats,
+        dataset_stats=norm_stats,
         preprocessor_overrides=preprocessor_overrides,
         postprocessor_overrides=postprocessor_overrides,
     )
@@ -242,6 +331,10 @@ def evaluate_episode(
             k: v for k, v in obs_batch.items()
             if k.startswith("observation.") or k == "task" or k == "task_index"
         }
+
+        # Force fresh forward pass every frame (bypass action chunk cache)
+        if hasattr(policy, "_queues") and policy._queues is not None:
+            policy._queues["action"].clear()
 
         amp_ctx = torch.autocast(device_type=device.type, dtype=torch.bfloat16) if use_amp else nullcontext()
         with torch.inference_mode(), amp_ctx:
@@ -376,6 +469,36 @@ def plot_summary(all_results: list[dict], output_dir: Path) -> plt.Figure:
     return fig
 
 
+def plot_action_dim_figure(
+    gt: np.ndarray,
+    pred: np.ndarray,
+    dim_name: str,
+    ep_idx: int,
+    mse: float,
+    y_min: float | None = None,
+    y_max: float | None = None,
+) -> plt.Figure:
+    """Create a single-axis figure for one action dimension (GT vs predicted).
+
+    *y_min* / *y_max* come from normalization bounds and set the y-axis range.
+    """
+    fig, ax = plt.subplots(figsize=(8, 3))
+    timesteps = np.arange(len(gt))
+    ax.plot(timesteps, gt, "b-", linewidth=1, label="GT")
+    ax.plot(timesteps, pred, "r--", linewidth=1, label="Pred")
+    ax.set_title(f"Episode {ep_idx} — {dim_name} (MSE: {mse:.4f})")
+    ax.set_xlabel("Step")
+    ax.set_ylabel(dim_name)
+    ax.legend(fontsize=7)
+
+    if y_min is not None and y_max is not None:
+        margin = (y_max - y_min) * 0.05
+        ax.set_ylim(y_min - margin, y_max + margin)
+
+    fig.tight_layout()
+    return fig
+
+
 def eval_on_dataset(cfg: EvalOnDatasetConfig):
     logging.info(pformat(asdict(cfg)))
 
@@ -414,8 +537,31 @@ def eval_on_dataset(cfg: EvalOnDatasetConfig):
     policy, preprocessor, postprocessor = load_policy_and_processors(cfg, dataset)
 
     # Determine which episodes to evaluate
-    episode_indices = list(range(len(dataset.meta.episodes)))
-    logging.info(f"Evaluating {len(episode_indices)} episodes")
+    total_episodes = len(dataset.meta.episodes)
+    episode_indices = parse_episodes(cfg.episodes, total_episodes)
+    logging.info(f"Evaluating {len(episode_indices)}/{total_episodes} episodes: {episode_indices}")
+
+    # Extract normalization bounds for action dimensions (used for local plots)
+    action_stats = dataset.meta.stats.get("action", {})
+    action_norm_mode = policy.config.normalization_mapping.get("ACTION", "IDENTITY")
+    action_bounds = None  # (min_per_dim, max_per_dim) arrays or None
+    if action_norm_mode == "MIN_MAX" and "min" in action_stats and "max" in action_stats:
+        action_bounds = (action_stats["min"], action_stats["max"])
+    elif action_norm_mode == "QUANTILES" and "q01" in action_stats and "q99" in action_stats:
+        action_bounds = (action_stats["q01"], action_stats["q99"])
+    elif action_norm_mode == "QUANTILE10" and "q10" in action_stats and "q90" in action_stats:
+        action_bounds = (action_stats["q10"], action_stats["q90"])
+    elif action_norm_mode == "MEAN_STD" and "min" in action_stats and "max" in action_stats:
+        action_bounds = (action_stats["min"], action_stats["max"])
+
+    # Define wandb custom step metrics (one x-axis per episode)
+    if wandb_run is not None:
+        import wandb
+
+        for ep_idx in episode_indices:
+            step_key = f"episode_{ep_idx}/_step"
+            wandb.define_metric(step_key, hidden=True)
+            wandb.define_metric(f"episode_{ep_idx}/*", step_metric=step_key)
 
     all_results = []
     for ep_idx in tqdm(episode_indices, desc="Evaluating episodes"):
@@ -431,17 +577,45 @@ def eval_on_dataset(cfg: EvalOnDatasetConfig):
         logging.info(f"Episode {ep_idx}: MSE={result['mse']:.4f}, L1={result['l1']:.4f}")
         all_results.append(result)
 
-        # Save per-episode plot locally; collect for bulk WandB upload after all episodes
-        fig = plot_episode(result, output_dir)
+        gt = result["gt_actions"].numpy()
+        pred = result["pred_actions"].numpy()
+        action_dim = gt.shape[1]
+        num_frames = result["num_frames"]
+
+        # ---- wandb: raw scalars, frame-by-frame ----
         if wandb_run is not None:
             import wandb
-            # Log all episode plots into the same panel; WandB step slider selects episode
-            wandb.log({"plots/episode_action": wandb.Image(fig)}, step=ep_idx)
-        plt.close(fig)
 
-    # Summary figures
+            for t in range(num_frames):
+                log_dict = {f"episode_{ep_idx}/_step": t}
+                for dim_i in range(action_dim):
+                    dname = _dim_name(dim_i)
+                    log_dict[f"episode_{ep_idx}/{dname}_gt"] = float(gt[t, dim_i])
+                    log_dict[f"episode_{ep_idx}/{dname}_pred"] = float(pred[t, dim_i])
+                wandb.log(log_dict)
+
+        # ---- Local: per-dimension matplotlib figures ----
+        ep_plots_dir = output_dir / "plots" / f"episode_{ep_idx}"
+        ep_plots_dir.mkdir(parents=True, exist_ok=True)
+
+        for dim_i in range(action_dim):
+            dname = _dim_name(dim_i)
+            y_min = float(action_bounds[0][dim_i]) if action_bounds is not None else None
+            y_max = float(action_bounds[1][dim_i]) if action_bounds is not None else None
+
+            fig = plot_action_dim_figure(
+                gt[:, dim_i], pred[:, dim_i], dname, ep_idx,
+                result["mse_per_dim"][dim_i].item(), y_min, y_max,
+            )
+            fig.savefig(ep_plots_dir / f"{dname}.png", dpi=150)
+            plt.close(fig)
+
+    # ---- Summary ----
     summary_fig = plot_summary(all_results, output_dir)
     fig_mse, fig_l1 = plot_episode_metrics_bar(all_results, output_dir)
+    plt.close(summary_fig)
+    plt.close(fig_mse)
+    plt.close(fig_l1)
 
     overall_mse = sum(r["mse"] for r in all_results) / len(all_results)
     overall_l1 = sum(r["l1"] for r in all_results) / len(all_results)
@@ -468,21 +642,19 @@ def eval_on_dataset(cfg: EvalOnDatasetConfig):
     if wandb_run is not None:
         import wandb
 
-        # Bar charts: MSE and L1 per episode in one panel each
-        wandb.log({
-            "plots/mse_per_episode": wandb.Image(fig_mse),
-            "plots/l1_per_episode": wandb.Image(fig_l1),
-            "plots/avg_dim_summary": wandb.Image(summary_fig),
+        summary_log: dict = {
             "summary/mse": overall_mse,
             "summary/l1": overall_l1,
-        })
+        }
         for i, (mse_val, l1_val) in enumerate(zip(avg_mse_per_dim.tolist(), avg_l1_per_dim.tolist())):
-            wandb.log({f"summary/mse_{_dim_name(i)}": mse_val, f"summary/l1_{_dim_name(i)}": l1_val})
+            summary_log[f"summary/mse_{_dim_name(i)}"] = mse_val
+            summary_log[f"summary/l1_{_dim_name(i)}"] = l1_val
+        for r in all_results:
+            eidx = r["ep_idx"]
+            summary_log[f"summary/per_ep/mse_ep_{eidx}"] = r["mse"]
+            summary_log[f"summary/per_ep/l1_ep_{eidx}"] = r["l1"]
+        wandb.log(summary_log)
         wandb.finish()
-
-    plt.close(summary_fig)
-    plt.close(fig_mse)
-    plt.close(fig_l1)
 
     logging.info(
         colored("Evaluation complete.", "green", attrs=["bold"])
