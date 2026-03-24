@@ -13,11 +13,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import logging
 import os
 import time
+from collections.abc import Iterator
 from contextlib import nullcontext
-from dataclasses import dataclass, field
 from pprint import pformat
 from typing import Any
 
@@ -27,25 +28,16 @@ from termcolor import colored
 from torch.optim import Optimizer
 
 from lerobot.configs import parser
-from lerobot.configs.default import DatasetConfig
 from lerobot.configs.train import TrainPipelineConfig
-from lerobot.datasets.factory import make_dataset, resolve_delta_timestamps, IMAGENET_STATS
-from lerobot.optim.optimizers import OptimizerConfig, AdamWConfig
-from lerobot.optim.schedulers import LRSchedulerConfig, DiffuserSchedulerConfig
-from lerobot.datasets.sampler import EpisodeAwareSampler
+from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.utils import cycle
-from lerobot.datasets.lerobot_dataset import (
-    LeRobotDataset,
-    LeRobotDatasetMetadata,
-    MultiLeRobotDataset,
-)
-from lerobot.datasets.transforms import ImageTransforms
 from lerobot.envs.factory import make_env, make_env_pre_post_processors
 from lerobot.envs.utils import close_envs
 from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.rl.wandb_utils import WandBLogger
+from lerobot.scripts.clare.create_er_dataset import ER_META_FILENAME
 from lerobot.scripts.lerobot_eval import eval_policy_all
 from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.utils.random_utils import set_seed
@@ -63,81 +55,109 @@ from lerobot.utils.utils import (
 )
 
 # Controls whether to reuse normalization stats from pretrained checkpoint.
-# Default True: when pretrained_path is given, preserve checkpoint's normalizer stats.
-# Override: set env var REUSE_PRETRAINED_NORMALIZATION=false to use dataset stats instead.
 REUSE_PRETRAINED_NORMALIZATION: bool = os.environ.get("REUSE_PRETRAINED_NORMALIZATION", "true").lower() != "false"
 
 # When set, load normalizer stats from this JSON file (same format as meta/stats.json).
-# Takes priority over REUSE_PRETRAINED_NORMALIZATION.
 NORM_STATS_FILE: str | None = os.environ.get("NORM_STATS_FILE")
 
 
-@dataclass
-class ERTrainPipelineConfig(TrainPipelineConfig):
-    # GR00T training defaults
-    seed: int | None = 42
-    batch_size: int = 16                    # 16 current + 16 replay = 32 total
-    steps: int = 10_000
-    log_freq: int = 100
-    save_freq: int = 10_000
-    eval_freq: int = 10_000
-    use_policy_training_preset: bool = False
-    optimizer: OptimizerConfig | None = field(
-        default_factory=lambda: AdamWConfig(
-            lr=1e-4, betas=(0.95, 0.999), weight_decay=1e-5, eps=1e-8, grad_clip_norm=1.0
-        )
-    )
-    scheduler: LRSchedulerConfig | None = field(
-        default_factory=lambda: DiffuserSchedulerConfig(name="cosine", num_warmup_steps=500)
-    )
-    # ER-specific
-    replay_dataset: DatasetConfig | None = None
-    replay_num_workers: int = 16
-    replay_batch_size: int = 16             # matches batch_size above
+class ERBatchSampler:
+    """Batch sampler that ensures each batch is 50% replay and 50% new data.
 
-    max_episodes_rendered: int = 100
-
-
-
-def make_replay_dataset(cfg: ERTrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDataset:
-    """Handles the logic of setting up delta timestamps and image transforms before creating a dataset.
-
-    Args:
-        cfg (ERTrainPipelineConfig): Config which contains a replay DatasetConfig and a PreTrainedConfig.
-
-    Raises:
-        NotImplementedError: The MultiLeRobotDataset is currently deactivated.
-
-    Returns:
-        LeRobotDataset | MultiLeRobotDataset
+    Uses episode IDs from er_meta.json to split frames into replay and new pools,
+    then yields batches with half from each pool.
     """
-    image_transforms = (
-        ImageTransforms(cfg.replay_dataset.image_transforms) if cfg.replay_dataset.image_transforms.enable else None
-    )
 
-    if isinstance(cfg.replay_dataset.repo_id, str):
-        ds_meta = LeRobotDatasetMetadata(
-            cfg.replay_dataset.repo_id, root=cfg.replay_dataset.root, revision=cfg.replay_dataset.revision
+    def __init__(
+        self,
+        dataset_from_indices: list[int],
+        dataset_to_indices: list[int],
+        replay_episodes: list[int],
+        new_episodes: list[int],
+        batch_size: int,
+        drop_n_last_frames: int = 0,
+        shuffle: bool = True,
+    ):
+        assert batch_size % 2 == 0, f"batch_size must be even, got {batch_size}"
+        self.batch_size = batch_size
+        self.half_batch = batch_size // 2
+        self.shuffle = shuffle
+
+        replay_set = set(replay_episodes)
+        new_set = set(new_episodes)
+
+        self.replay_indices = []
+        self.new_indices = []
+
+        for ep_idx, (start, end) in enumerate(zip(dataset_from_indices, dataset_to_indices, strict=True)):
+            frame_indices = list(range(start, end - drop_n_last_frames))
+            if ep_idx in replay_set:
+                self.replay_indices.extend(frame_indices)
+            elif ep_idx in new_set:
+                self.new_indices.extend(frame_indices)
+
+        if not self.replay_indices:
+            raise ValueError("No replay frames found. Check er_meta.json replay_episodes.")
+        if not self.new_indices:
+            raise ValueError("No new frames found. Check er_meta.json new_episodes.")
+
+        logging.info(
+            f"ERBatchSampler: {len(self.replay_indices)} replay frames, "
+            f"{len(self.new_indices)} new frames, batch_size={batch_size}"
         )
-        delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta)
-        dataset = LeRobotDataset(
-            cfg.replay_dataset.repo_id,
-            root=cfg.replay_dataset.root,
-            episodes=cfg.replay_dataset.episodes,
-            delta_timestamps=delta_timestamps,
-            image_transforms=image_transforms,
-            revision=cfg.replay_dataset.revision,
-            video_backend=cfg.replay_dataset.video_backend,
+
+    def __iter__(self) -> Iterator[list[int]]:
+        if self.shuffle:
+            replay_perm = torch.randperm(len(self.replay_indices)).tolist()
+            new_perm = torch.randperm(len(self.new_indices)).tolist()
+        else:
+            replay_perm = list(range(len(self.replay_indices)))
+            new_perm = list(range(len(self.new_indices)))
+
+        # Cycle the smaller pool to match the larger
+        n_batches = max(
+            len(self.replay_indices) // self.half_batch,
+            len(self.new_indices) // self.half_batch,
         )
-    else:
-        raise NotImplementedError("The MultiLeRobotDataset isn't supported for now.")
 
-    if cfg.replay_dataset.use_imagenet_stats:
-        for key in dataset.meta.camera_keys:
-            for stats_type, stats in IMAGENET_STATS.items():
-                dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
+        replay_idx = 0
+        new_idx = 0
+        for _ in range(n_batches):
+            batch = []
+            # Replay half
+            for _ in range(self.half_batch):
+                if replay_idx >= len(replay_perm):
+                    # Reshuffle and cycle
+                    replay_perm = torch.randperm(len(self.replay_indices)).tolist() if self.shuffle else list(range(len(self.replay_indices)))
+                    replay_idx = 0
+                batch.append(self.replay_indices[replay_perm[replay_idx]])
+                replay_idx += 1
+            # New half
+            for _ in range(self.half_batch):
+                if new_idx >= len(new_perm):
+                    new_perm = torch.randperm(len(self.new_indices)).tolist() if self.shuffle else list(range(len(self.new_indices)))
+                    new_idx = 0
+                batch.append(self.new_indices[new_perm[new_idx]])
+                new_idx += 1
+            yield batch
 
-    return dataset
+    def __len__(self) -> int:
+        return max(
+            len(self.replay_indices) // self.half_batch,
+            len(self.new_indices) // self.half_batch,
+        )
+
+
+def load_er_meta(dataset_root) -> dict:
+    """Load er_meta.json from dataset root."""
+    meta_path = dataset_root / ER_META_FILENAME
+    if not meta_path.exists():
+        raise FileNotFoundError(
+            f"er_meta.json not found at {meta_path}. "
+            "Run create_er_dataset.py first to create the merged ER dataset."
+        )
+    with open(meta_path) as f:
+        return json.load(f)
 
 
 def update_policy(
@@ -183,7 +203,7 @@ def update_policy(
 
 
 @parser.wrap()
-def train(cfg: ERTrainPipelineConfig):
+def train(cfg: TrainPipelineConfig):
     cfg.validate()
 
     from accelerate.utils import DistributedDataParallelKwargs
@@ -214,8 +234,12 @@ def train(cfg: ERTrainPipelineConfig):
     logging.info("Creating dataset")
     dataset = make_dataset(cfg)
 
-    logging.info("Creating replay buffer dataset")
-    replay_dataset = make_replay_dataset(cfg)
+    # Load ER episode split metadata
+    er_meta = load_er_meta(dataset.meta.root)
+    logging.info(
+        f"ER dataset: {len(er_meta['replay_episodes'])} replay episodes, "
+        f"{len(er_meta['new_episodes'])} new episodes"
+    )
 
     # Create evaluation environment
     eval_env = None
@@ -235,10 +259,8 @@ def train(cfg: ERTrainPipelineConfig):
     )
 
     # Create preprocessor/postprocessor
-    # Resolve normalization stats: NORM_STATS_FILE > dataset stats / pretrained stats
     _norm_stats = None
     if NORM_STATS_FILE:
-        import json
         logging.info(f"Loading normalizer stats from NORM_STATS_FILE: {NORM_STATS_FILE}")
         with open(NORM_STATS_FILE) as f:
             _norm_stats = json.load(f)
@@ -299,57 +321,31 @@ def train(cfg: ERTrainPipelineConfig):
     logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
     logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
-    # Create dataloaders
-    if hasattr(cfg.policy, "drop_n_last_frames"):
-        shuffle = False
-        sampler = EpisodeAwareSampler(
-            dataset.meta.episodes["dataset_from_index"],
-            dataset.meta.episodes["dataset_to_index"],
-            episode_indices_to_use=dataset.episodes,
-            drop_n_last_frames=cfg.policy.drop_n_last_frames,
-            shuffle=True,
-        )
-        replay_sampler = EpisodeAwareSampler(
-            replay_dataset.meta.episodes["dataset_from_index"],
-            replay_dataset.meta.episodes["dataset_to_index"],
-            episode_indices_to_use=replay_dataset.episodes,
-            drop_n_last_frames=cfg.policy.drop_n_last_frames,
-            shuffle=True,
-        )
-    else:
-        shuffle = True
-        sampler = None
-        replay_sampler = None
+    # Create ER batch sampler: each batch is 50% replay + 50% new
+    drop_n_last = getattr(cfg.policy, "drop_n_last_frames", 0)
+    batch_sampler = ERBatchSampler(
+        dataset_from_indices=dataset.meta.episodes["dataset_from_index"],
+        dataset_to_indices=dataset.meta.episodes["dataset_to_index"],
+        replay_episodes=er_meta["replay_episodes"],
+        new_episodes=er_meta["new_episodes"],
+        batch_size=cfg.batch_size,
+        drop_n_last_frames=drop_n_last,
+        shuffle=True,
+    )
 
     dataloader = torch.utils.data.DataLoader(
         dataset,
         num_workers=cfg.num_workers,
-        batch_size=cfg.batch_size,
-        shuffle=shuffle and not cfg.dataset.streaming,
-        sampler=sampler,
+        batch_sampler=batch_sampler,
         pin_memory=device.type == "cuda",
-        drop_last=False,
         prefetch_factor=2 if cfg.num_workers > 0 else None,
-    )
-
-    replay_dataloader = torch.utils.data.DataLoader(
-        replay_dataset,
-        num_workers=cfg.replay_num_workers,
-        batch_size=cfg.replay_batch_size,
-        shuffle=shuffle,
-        sampler=replay_sampler,
-        pin_memory=device.type == "cuda",
-        drop_last=False,
-        prefetch_factor=2 if cfg.replay_num_workers > 0 else None,
     )
 
     # Prepare with accelerator
     policy, optimizer, dataloader, lr_scheduler = accelerator.prepare(
         policy, optimizer, dataloader, lr_scheduler
     )
-    replay_dataloader = accelerator.prepare(replay_dataloader)
     dl_iter = cycle(dataloader)
-    replay_dl_iter = cycle(replay_dataloader)
 
     policy.train()
 
@@ -366,21 +362,13 @@ def train(cfg: ERTrainPipelineConfig):
         initial_step=step, accelerator=accelerator,
     )
 
-    logging.info("Start offline training on a fixed dataset")
+    logging.info("Start ER training on merged dataset")
     for _ in range(step, cfg.steps):
         start_time = time.perf_counter()
         batch = next(dl_iter)
-        replay_batch = next(replay_dl_iter)
         train_tracker.dataloading_s = time.perf_counter() - start_time
 
         batch = preprocessor(batch)
-        replay_batch = preprocessor(replay_batch)
-
-        for key in batch:
-            if isinstance(batch[key], torch.Tensor):
-                batch[key] = torch.cat([batch[key], replay_batch[key]], dim=0)
-            else:
-                batch[key].extend(replay_batch[key])
 
         train_tracker, output_dict = update_policy(
             train_tracker,
@@ -420,7 +408,7 @@ def train(cfg: ERTrainPipelineConfig):
                     postprocessor=postprocessor,
                     n_episodes=cfg.eval.n_episodes,
                     videos_dir=cfg.output_dir / "eval" / f"videos_step_{step_id}",
-                    max_episodes_rendered=cfg.max_episodes_rendered,
+                    max_episodes_rendered=100,
                     start_seed=cfg.seed,
                 )
             aggregated = eval_info["overall"]
