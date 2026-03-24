@@ -25,11 +25,11 @@ NORM_STATS_FILE="${NORM_STATS_FILE:-configs/union_stats.json}"
 PRETRAINED_PATH="continuallearning/dit_fft_pretraining_v2_lerobot30_seed1000"
 
 DATASETS=(
-    "real_0_put_bowl_filtered"
-    "real_1_stack_bowls_filtered"
-    "real_2_put_moka_pot_filtered"
-    "real_3_close_drawer_filtered"
-    "real_4_put_lego_into_drawer_filtered"
+    "real_0_put_bowl_filtered_consolidated"
+    "real_1_stack_bowls_filtered_consolidated"
+    "real_2_put_moka_pot_filtered_consolidated"
+    "real_3_close_drawer_filtered_consolidated"
+    "real_4_put_lego_into_drawer_filtered_consolidated"
 )
 
 # ===== Training Loop =====
@@ -58,7 +58,7 @@ for i in "${!DATASETS[@]}"; do
         export PEFT_CFG_PATH="${PEFT_CFG}"
         unset PEFT_WEIGHT_PATH
     else
-        export PEFT_WEIGHT_PATH="${PREV_OUTPUT_DIR}/checkpoints/last/adapter/default"
+        export PEFT_WEIGHT_PATH="${PREV_OUTPUT_DIR}/checkpoints/last/adapter"
         unset PEFT_CFG_PATH
     fi
 
@@ -107,7 +107,7 @@ for i in "${!DATASETS[@]}"; do
         --policy.push_to_hub=true \
         --policy.repo_id="${REPO_ID}" \
         --batch_size=256 \
-        --num_workers=16 \
+        --num_workers=8 \
         --steps=${STEPS} \
         --seed=${SEED} \
         --eval_freq=0 \

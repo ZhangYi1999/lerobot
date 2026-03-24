@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import gc
 import logging
 import os
 import time
@@ -96,6 +97,13 @@ MAX_EPISODES_RENDERED: int = int(os.environ.get("MAX_EPISODES_RENDERED", "4"))
 TRAIN_DISCRIMINATOR_LR: float = float(os.environ.get("TRAIN_DISCRIMINATOR_LR", "0.0005"))
 TRAIN_DISCRIMINATOR_WD: float = float(os.environ.get("TRAIN_DISCRIMINATOR_WD", "0.01"))
 TRAIN_DISCRIMINATOR_GRAD_CLIP: float = float(os.environ.get("TRAIN_DISCRIMINATOR_GRAD_CLIP", "10.0"))
+
+
+def _log_vram(tag: str):
+    if torch.cuda.is_available():
+        alloc = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        logging.info(f"[VRAM] {tag}: allocated={alloc:.2f}GB  reserved={reserved:.2f}GB")
 
 
 def _make_discriminator_optimizer_config() -> AdamWConfig:
@@ -777,6 +785,7 @@ def train_adapter(cfg: TrainPipelineConfig):
         close_envs(eval_env)
 
     logging.info("End of adapter training")
+    _log_vram("train_adapter end")
 
     accelerator.wait_for_everyone()
     accelerator.end_training()
@@ -818,6 +827,14 @@ def train_discriminator(cfg: TrainPipelineConfig, skip_expand: bool = False):
     for peft_module in peft_modules:
         peft_module.train_discriminator(True)
         peft_module.update_stats(True)
+
+    # Freeze everything except discriminator params so autograd does not build a
+    # computation graph through the adapter during forward passes (saves activation memory).
+    for p in policy.parameters():
+        p.requires_grad = False
+    for p in discriminator_params:
+        p.requires_grad = True
+    _log_vram("train_discriminator start (after freeze)")
 
     optimizer = discriminator_optimizer
     lr_scheduler = discriminator_lr_scheduler
@@ -892,6 +909,9 @@ def train_discriminator(cfg: TrainPipelineConfig, skip_expand: bool = False):
         step += 1
         train_tracker.step()
 
+        if step == init_step + 1:
+            _log_vram("train_discriminator first step")
+
         is_log_step = TRAIN_DISCRIMINATORS_LOG_FREQ > 0 and (step - init_step) % TRAIN_DISCRIMINATORS_LOG_FREQ == 0
         is_saving_step = (step - init_step) % TRAIN_DISCRIMINATORS_SAVE_FREQ == 0 or step == init_step + TRAIN_DISCRIMINATORS_STEPS
         is_eval_step = TRAIN_DISCRIMINATORS_EVAL_FREQ > 0 and (step - init_step) % TRAIN_DISCRIMINATORS_EVAL_FREQ == 0
@@ -965,6 +985,13 @@ def train_discriminator_only(cfg: TrainPipelineConfig):
         discriminator_params.extend(list(disc.parameters()))
 
     logging.info(f"Collected {len(discriminator_params)} discriminator parameters")
+
+    # Freeze everything except discriminator params so autograd does not build a
+    # computation graph through the adapter during forward passes (saves activation memory).
+    for p in policy.parameters():
+        p.requires_grad = False
+    for p in discriminator_params:
+        p.requires_grad = True
 
     # Create discriminator optimizer
     disc_optimizer_cfg = _make_discriminator_optimizer_config()
@@ -1116,6 +1143,13 @@ def train(cfg: TrainPipelineConfig):
         train_discriminator_only(cfg)
     else:  # "full" — original behavior
         train_adapter(cfg)
+        # Free adapter optimizer states (Adam m/v) before discriminator phase.
+        # train_adapter's locals are out of scope but PyTorch's caching allocator
+        # holds VRAM until explicitly flushed.
+        _log_vram("before gc/empty_cache")
+        gc.collect()
+        torch.cuda.empty_cache()
+        _log_vram("after gc/empty_cache")
         # Point to the adapter checkpoint so train_discriminator loads trained weights
         adapter_ckpt = (Path(cfg.output_dir) / "checkpoints" / "last" / "adapter").resolve()
         PEFT_WEIGHT_PATH = str(adapter_ckpt)
