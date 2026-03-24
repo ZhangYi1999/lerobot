@@ -58,7 +58,7 @@ for i in "${!DATASETS[@]}"; do
         export PEFT_CFG_PATH="${PEFT_CFG}"
         unset PEFT_WEIGHT_PATH
     else
-        export PEFT_WEIGHT_PATH="${PREV_OUTPUT_DIR}/disc_checkpoints/last/adapter"
+        export PEFT_WEIGHT_PATH="${PREV_OUTPUT_DIR}/checkpoints/last/adapter"
         unset PEFT_CFG_PATH
     fi
 

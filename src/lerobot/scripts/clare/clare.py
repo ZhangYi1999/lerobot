@@ -724,7 +724,7 @@ def _do_eval(
             wandb_logger.log_video(eval_info["overall"]["video_paths"][-1], step, mode="eval")
 
 
-def train_adapter(cfg: TrainPipelineConfig):
+def train_adapter(cfg: TrainPipelineConfig, skip_push_to_hub: bool = False):
     """Phase 1: Expand layers and train func_adapters only."""
     (accelerator, device, dataset, eval_env, env_preprocessor, env_postprocessor,
      policy, peft_policy, peft_modules, peft_config, preprocessor, postprocessor, wandb_logger) = _setup_common(cfg)
@@ -870,6 +870,12 @@ def train_adapter(cfg: TrainPipelineConfig):
 
     logging.info("End of adapter training")
     _log_vram("train_adapter end")
+
+    if not skip_push_to_hub and cfg.policy.push_to_hub and accelerator.is_main_process:
+        unwrapped_policy = accelerator.unwrap_model(policy)
+        unwrapped_policy.push_model_to_hub(cfg, peft_model=peft_policy)
+        preprocessor.push_to_hub(cfg.policy.repo_id)
+        postprocessor.push_to_hub(cfg.policy.repo_id)
 
     accelerator.wait_for_everyone()
     accelerator.end_training()
@@ -1030,6 +1036,12 @@ def train_discriminator(cfg: TrainPipelineConfig, skip_expand: bool = False):
         close_envs(eval_env)
 
     logging.info("End of discriminator training")
+
+    if cfg.policy.push_to_hub and accelerator.is_main_process:
+        unwrapped_policy = accelerator.unwrap_model(policy)
+        unwrapped_policy.push_model_to_hub(cfg, peft_model=peft_policy)
+        preprocessor.push_to_hub(cfg.policy.repo_id)
+        postprocessor.push_to_hub(cfg.policy.repo_id)
 
     accelerator.wait_for_everyone()
     accelerator.end_training()
@@ -1197,6 +1209,12 @@ def train_discriminator_only(cfg: TrainPipelineConfig):
 
     logging.info(f"End of discriminator training for task {task_id}")
 
+    if cfg.policy.push_to_hub and accelerator.is_main_process:
+        unwrapped_policy = accelerator.unwrap_model(policy)
+        unwrapped_policy.push_model_to_hub(cfg, peft_model=peft_policy)
+        preprocessor.push_to_hub(cfg.policy.repo_id)
+        postprocessor.push_to_hub(cfg.policy.repo_id)
+
     accelerator.wait_for_everyone()
     accelerator.end_training()
 
@@ -1234,7 +1252,7 @@ def train(cfg: TrainPipelineConfig):
     elif CLARE_PHASE == "discriminator_only":
         train_discriminator_only(cfg)
     else:  # "full" — original behavior
-        train_adapter(cfg)
+        train_adapter(cfg, skip_push_to_hub=True)
         # Free adapter optimizer states (Adam m/v) before discriminator phase.
         # train_adapter's locals are out of scope but PyTorch's caching allocator
         # holds VRAM until explicitly flushed.
