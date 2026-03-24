@@ -41,17 +41,16 @@ from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.rl.wandb_utils import WandBLogger
 from lerobot.scripts.lerobot_eval import eval_policy_all
 from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
-from lerobot.utils.random_utils import set_seed, load_rng_state
+from lerobot.utils.random_utils import set_seed, load_rng_state, save_rng_state
 from lerobot.utils.train_utils import (
-    get_step_checkpoint_dir,
     get_step_identifier,
     load_training_state,
     save_checkpoint,
-    update_last_checkpoint,
+    save_training_step,
     load_training_step,
 )
-from lerobot.optim.optimizers import load_optimizer_state
-from lerobot.optim.schedulers import load_scheduler_state
+from lerobot.optim.optimizers import load_optimizer_state, save_optimizer_state
+from lerobot.optim.schedulers import load_scheduler_state, save_scheduler_state
 from lerobot.utils.utils import (
     format_big_number,
     has_method,
@@ -82,6 +81,7 @@ TRAIN_DISCRIMINATORS_STEPS: int = int(os.environ.get("TRAIN_DISCRIMINATORS_STEPS
 TRAIN_DISCRIMINATORS_LOG_FREQ: int = int(os.environ.get("TRAIN_DISCRIMINATORS_LOG_FREQ", "50"))
 TRAIN_DISCRIMINATORS_SAVE_FREQ: int = int(os.environ.get("TRAIN_DISCRIMINATORS_SAVE_FREQ", "2000"))
 TRAIN_DISCRIMINATORS_EVAL_FREQ: int = int(os.environ.get("TRAIN_DISCRIMINATORS_EVAL_FREQ", "2000"))
+DISC_CHECKPOINT_PATH: str | None = os.environ.get("DISC_CHECKPOINT_PATH")
 
 EXPAND_THRESHOLD: float = float(os.environ.get("EXPAND_THRESHOLD", "0.0"))
 AT_LEAST_EXPAND: str = os.environ.get("AT_LEAST_EXPAND", "shallowest")
@@ -104,6 +104,85 @@ def _log_vram(tag: str):
         alloc = torch.cuda.memory_allocated() / 1024**3
         reserved = torch.cuda.memory_reserved() / 1024**3
         logging.info(f"[VRAM] {tag}: allocated={alloc:.2f}GB  reserved={reserved:.2f}GB")
+
+
+ADAPTER_CHECKPOINTS_DIR = "adapter_checkpoints"
+DISC_CHECKPOINTS_DIR = "disc_checkpoints"
+
+
+def get_adapter_step_checkpoint_dir(output_dir: Path, total_steps: int, step: int) -> Path:
+    """Returns adapter_checkpoints/XXXXXX/"""
+    return Path(output_dir) / ADAPTER_CHECKPOINTS_DIR / get_step_identifier(step, total_steps)
+
+
+def get_disc_step_checkpoint_dir(output_dir: Path, total_steps: int, step: int) -> Path:
+    """Returns disc_checkpoints/XXXXXX/"""
+    return Path(output_dir) / DISC_CHECKPOINTS_DIR / get_step_identifier(step, total_steps)
+
+
+def update_last_adapter_checkpoint(adapter_ckpt_dir: Path, output_dir: Path, local_step: int) -> None:
+    """Update adapter_checkpoints/last, checkpoints/{step} symlink, and checkpoints/last."""
+    output_dir = Path(output_dir)
+    adapter_ckpts = output_dir / ADAPTER_CHECKPOINTS_DIR
+    # adapter_checkpoints/last -> step_id
+    last_adapter = adapter_ckpts / "last"
+    if last_adapter.is_symlink():
+        last_adapter.unlink()
+    last_adapter.symlink_to(adapter_ckpt_dir.name)
+    # checkpoints/{step_id} -> ../adapter_checkpoints/{step_id}
+    ckpts = output_dir / "checkpoints"
+    ckpts.mkdir(parents=True, exist_ok=True)
+    step_link = ckpts / f"{local_step:06d}"
+    if step_link.is_symlink():
+        step_link.unlink()
+    step_link.symlink_to(Path("..") / ADAPTER_CHECKPOINTS_DIR / adapter_ckpt_dir.name)
+    # checkpoints/last -> ../adapter_checkpoints/last
+    last = ckpts / "last"
+    if last.is_symlink():
+        last.unlink()
+    last.symlink_to(Path("..") / ADAPTER_CHECKPOINTS_DIR / "last")
+
+
+def update_last_disc_checkpoint(
+    disc_ckpt_dir: Path, output_dir: Path, cfg_steps: int, disc_step: int
+) -> None:
+    """Update disc_checkpoints/last, checkpoints/{global_step} symlink, and checkpoints/last."""
+    output_dir = Path(output_dir)
+    disc_ckpts = output_dir / DISC_CHECKPOINTS_DIR
+    # disc_checkpoints/last -> step_id
+    last_disc = disc_ckpts / "last"
+    if last_disc.is_symlink():
+        last_disc.unlink()
+    last_disc.symlink_to(disc_ckpt_dir.name)
+    # checkpoints/{global_step_id} -> ../disc_checkpoints/{disc_step_id}
+    ckpts = output_dir / "checkpoints"
+    ckpts.mkdir(parents=True, exist_ok=True)
+    global_step = cfg_steps + disc_step
+    step_link = ckpts / f"{global_step:06d}"
+    if step_link.is_symlink():
+        step_link.unlink()
+    step_link.symlink_to(Path("..") / DISC_CHECKPOINTS_DIR / disc_ckpt_dir.name)
+    # checkpoints/last -> ../disc_checkpoints/last
+    last = ckpts / "last"
+    if last.is_symlink():
+        last.unlink()
+    last.symlink_to(Path("..") / DISC_CHECKPOINTS_DIR / "last")
+
+
+def save_discriminator_training_state(
+    checkpoint_dir: Path, step: int, optimizer: Optimizer, scheduler
+) -> None:
+    """Save discriminator training state to discriminator_training_state/ subdir.
+
+    Mirrors load_discriminator_training_state() which reads from this same location.
+    """
+    save_dir = checkpoint_dir / "discriminator_training_state"
+    save_dir.mkdir(parents=True, exist_ok=True)
+    save_training_step(step, save_dir)
+    save_rng_state(save_dir)
+    save_optimizer_state(optimizer, save_dir)
+    if scheduler is not None:
+        save_scheduler_state(scheduler, save_dir)
 
 
 def _make_discriminator_optimizer_config() -> AdamWConfig:
@@ -662,10 +741,15 @@ def train_adapter(cfg: TrainPipelineConfig):
     else:
         adapter_lr_scheduler = None
 
+    # global_step_offset: steps consumed by the detection phase (0 for task 0).
+    # local_step: steps within THIS adapter training phase (0 → cfg.steps).
+    global_step_offset = step
+    local_step = 0
     if cfg.resume:
-        step, adapter_optimizer, adapter_lr_scheduler = load_training_state(
+        local_step, adapter_optimizer, adapter_lr_scheduler = load_training_state(
             cfg.checkpoint_path, adapter_optimizer, adapter_lr_scheduler
         )
+    step = global_step_offset + local_step  # global counter for WandB
 
     num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     num_adapter_params = sum(p.numel() for p in adapter_params)
@@ -737,8 +821,7 @@ def train_adapter(cfg: TrainPipelineConfig):
     )
 
     logging.info("Start training func adapters")
-    init_step = step
-    for _ in range(init_step, init_step + cfg.steps):
+    for _ in range(local_step, cfg.steps):  # only remaining steps when resuming
         start_time = time.perf_counter()
         batch = next(dl_iter)
         batch = preprocessor(batch)
@@ -750,11 +833,12 @@ def train_adapter(cfg: TrainPipelineConfig):
         )
 
         step += 1
+        local_step += 1
         train_tracker.step()
 
         is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0
-        is_saving_step = (step - init_step) % cfg.save_freq == 0 or step == init_step + cfg.steps
-        is_eval_step = cfg.eval_freq > 0 and (step - init_step) % cfg.eval_freq == 0
+        is_saving_step = local_step % cfg.save_freq == 0 or local_step == cfg.steps
+        is_eval_step = cfg.eval_freq > 0 and local_step % cfg.eval_freq == 0
 
         if is_log_step:
             logging.info(train_tracker)
@@ -770,16 +854,16 @@ def train_adapter(cfg: TrainPipelineConfig):
                      preprocessor, postprocessor, dataset, wandb_logger, accelerator)
 
         if cfg.save_checkpoint and is_saving_step:
-            logging.info(f"Checkpoint policy after step {step}")
-            checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
+            logging.info(f"Checkpoint policy after adapter step {local_step}")
+            checkpoint_dir = get_adapter_step_checkpoint_dir(cfg.output_dir, cfg.steps, local_step)
 
             peft_policy.save_pretrained(str(checkpoint_dir / "adapter"))
 
             save_checkpoint(
-                checkpoint_dir, step, cfg, accelerator.unwrap_model(policy), optimizer, lr_scheduler,
+                checkpoint_dir, local_step, cfg, accelerator.unwrap_model(policy), optimizer, lr_scheduler,
                 preprocessor=preprocessor, postprocessor=postprocessor,
             )
-            update_last_checkpoint(checkpoint_dir)
+            update_last_adapter_checkpoint(checkpoint_dir, cfg.output_dir, local_step)
 
     if eval_env:
         close_envs(eval_env)
@@ -798,7 +882,6 @@ def train_discriminator(cfg: TrainPipelineConfig, skip_expand: bool = False):
 
     if skip_expand:
         # In "full" mode, layers are already expanded — just collect existing discriminator params
-        step = 0
         discriminator_params = []
         for peft_module in peft_modules:
             for disc in peft_module.clare_discriminators[peft_module.adapter_name]:
@@ -809,7 +892,7 @@ def train_discriminator(cfg: TrainPipelineConfig, skip_expand: bool = False):
             peft_module._forwarded_adapter_id = peft_module.num_adapters - 1
             peft_module._forwarded_discriminator_id = peft_module.num_discriminators - 1
     else:
-        adapter_params, discriminator_params, step = _expand_layers(
+        adapter_params, discriminator_params, _detection_steps = _expand_layers(
             cfg, wandb_logger, policy, peft_modules, peft_config, dataset, preprocessor, accelerator
         )
 
@@ -818,9 +901,11 @@ def train_discriminator(cfg: TrainPipelineConfig, skip_expand: bool = False):
     discriminator_optimizer = disc_optimizer_cfg.build(discriminator_params)
     discriminator_lr_scheduler = None
 
+    disc_step = 0
     if cfg.resume:
-        step, discriminator_optimizer, discriminator_lr_scheduler = load_discriminator_training_state(
-            cfg.checkpoint_path, discriminator_optimizer, discriminator_lr_scheduler
+        assert DISC_CHECKPOINT_PATH, "DISC_CHECKPOINT_PATH must be set when resuming discriminator training"
+        disc_step, discriminator_optimizer, discriminator_lr_scheduler = load_discriminator_training_state(
+            Path(DISC_CHECKPOINT_PATH), discriminator_optimizer, discriminator_lr_scheduler
         )
 
     # Set discriminator training mode
@@ -890,12 +975,11 @@ def train_discriminator(cfg: TrainPipelineConfig, skip_expand: bool = False):
 
     train_tracker = MetricsTracker(
         cfg.batch_size, dataset.num_frames, dataset.num_episodes, train_metrics,
-        initial_step=step, accelerator=accelerator,
+        initial_step=disc_step, accelerator=accelerator,
     )
 
     logging.info("Start training discriminators")
-    init_step = step
-    for _ in range(init_step, init_step + TRAIN_DISCRIMINATORS_STEPS):
+    for _ in range(disc_step, TRAIN_DISCRIMINATORS_STEPS):  # only remaining steps when resuming
         start_time = time.perf_counter()
         batch = next(dl_iter)
         batch = preprocessor(batch)
@@ -906,15 +990,15 @@ def train_discriminator(cfg: TrainPipelineConfig, skip_expand: bool = False):
             disc_optimizer_cfg.grad_clip_norm, accelerator=accelerator, lr_scheduler=lr_scheduler,
         )
 
-        step += 1
+        disc_step += 1
         train_tracker.step()
 
-        if step == init_step + 1:
+        if disc_step == 1:
             _log_vram("train_discriminator first step")
 
-        is_log_step = TRAIN_DISCRIMINATORS_LOG_FREQ > 0 and (step - init_step) % TRAIN_DISCRIMINATORS_LOG_FREQ == 0
-        is_saving_step = (step - init_step) % TRAIN_DISCRIMINATORS_SAVE_FREQ == 0 or step == init_step + TRAIN_DISCRIMINATORS_STEPS
-        is_eval_step = TRAIN_DISCRIMINATORS_EVAL_FREQ > 0 and (step - init_step) % TRAIN_DISCRIMINATORS_EVAL_FREQ == 0
+        is_log_step = TRAIN_DISCRIMINATORS_LOG_FREQ > 0 and disc_step % TRAIN_DISCRIMINATORS_LOG_FREQ == 0
+        is_saving_step = disc_step % TRAIN_DISCRIMINATORS_SAVE_FREQ == 0 or disc_step == TRAIN_DISCRIMINATORS_STEPS
+        is_eval_step = TRAIN_DISCRIMINATORS_EVAL_FREQ > 0 and disc_step % TRAIN_DISCRIMINATORS_EVAL_FREQ == 0
 
         if is_log_step:
             logging.info(train_tracker)
@@ -922,24 +1006,25 @@ def train_discriminator(cfg: TrainPipelineConfig, skip_expand: bool = False):
                 wandb_log_dict = _prefix_keys(train_tracker.to_dict(), "discriminator")
                 if output_dict:
                     wandb_log_dict.update(_prefix_keys(output_dict, "discriminator"))
-                wandb_logger.log_dict(wandb_log_dict, step, mode="train")
+                wandb_logger.log_dict(wandb_log_dict, disc_step, mode="train")
             train_tracker.reset_averages()
 
         if cfg.env and eval_env and is_eval_step:
-            _do_eval(cfg, step, policy, peft_modules, eval_env, env_preprocessor, env_postprocessor,
+            _do_eval(cfg, disc_step, policy, peft_modules, eval_env, env_preprocessor, env_postprocessor,
                      preprocessor, postprocessor, dataset, wandb_logger, accelerator)
 
         if cfg.save_checkpoint and is_saving_step:
-            logging.info(f"Checkpoint policy after step {step}")
-            checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
+            logging.info(f"Checkpoint policy after discriminator step {disc_step}")
+            checkpoint_dir = get_disc_step_checkpoint_dir(cfg.output_dir, TRAIN_DISCRIMINATORS_STEPS, disc_step)
 
             peft_policy.save_pretrained(str(checkpoint_dir / "adapter"))
 
             save_checkpoint(
-                checkpoint_dir, step, cfg, accelerator.unwrap_model(policy), optimizer, lr_scheduler,
+                checkpoint_dir, disc_step, cfg, accelerator.unwrap_model(policy), optimizer, lr_scheduler,
                 preprocessor=preprocessor, postprocessor=postprocessor,
             )
-            update_last_checkpoint(checkpoint_dir)
+            save_discriminator_training_state(checkpoint_dir, disc_step, optimizer, lr_scheduler)
+            update_last_disc_checkpoint(checkpoint_dir, cfg.output_dir, cfg.steps, disc_step)
 
     if eval_env:
         close_envs(eval_env)
@@ -998,6 +1083,13 @@ def train_discriminator_only(cfg: TrainPipelineConfig):
     discriminator_optimizer = disc_optimizer_cfg.build(discriminator_params)
     discriminator_lr_scheduler = None
 
+    disc_step = 0
+    if cfg.resume:
+        assert DISC_CHECKPOINT_PATH, "DISC_CHECKPOINT_PATH must be set when resuming discriminator_only training"
+        disc_step, discriminator_optimizer, discriminator_lr_scheduler = load_discriminator_training_state(
+            Path(DISC_CHECKPOINT_PATH), discriminator_optimizer, discriminator_lr_scheduler
+        )
+
     optimizer = discriminator_optimizer
     lr_scheduler = discriminator_lr_scheduler
 
@@ -1050,14 +1142,13 @@ def train_discriminator_only(cfg: TrainPipelineConfig):
             train_metrics[f"running_std_{key}"] = AverageMeter(f"running_std_{key}", ":.3f")
             train_metrics[f"num_batches_tracked_{key}"] = AverageMeter(f"num_batches_tracked_{key}", ":.0f")
 
-    step = 0
     train_tracker = MetricsTracker(
         cfg.batch_size, dataset.num_frames, dataset.num_episodes, train_metrics,
-        initial_step=step, accelerator=accelerator,
+        initial_step=disc_step, accelerator=accelerator,
     )
 
     logging.info(f"Start training discriminator for task {task_id}")
-    for _ in range(TRAIN_DISCRIMINATORS_STEPS):
+    for _ in range(disc_step, TRAIN_DISCRIMINATORS_STEPS):  # only remaining steps when resuming
         start_time = time.perf_counter()
         batch = next(dl_iter)
         batch = preprocessor(batch)
@@ -1068,12 +1159,12 @@ def train_discriminator_only(cfg: TrainPipelineConfig):
             disc_optimizer_cfg.grad_clip_norm, accelerator=accelerator, lr_scheduler=lr_scheduler,
         )
 
-        step += 1
+        disc_step += 1
         train_tracker.step()
 
-        is_log_step = TRAIN_DISCRIMINATORS_LOG_FREQ > 0 and step % TRAIN_DISCRIMINATORS_LOG_FREQ == 0
-        is_saving_step = step % TRAIN_DISCRIMINATORS_SAVE_FREQ == 0 or step == TRAIN_DISCRIMINATORS_STEPS
-        is_eval_step = TRAIN_DISCRIMINATORS_EVAL_FREQ > 0 and step % TRAIN_DISCRIMINATORS_EVAL_FREQ == 0
+        is_log_step = TRAIN_DISCRIMINATORS_LOG_FREQ > 0 and disc_step % TRAIN_DISCRIMINATORS_LOG_FREQ == 0
+        is_saving_step = disc_step % TRAIN_DISCRIMINATORS_SAVE_FREQ == 0 or disc_step == TRAIN_DISCRIMINATORS_STEPS
+        is_eval_step = TRAIN_DISCRIMINATORS_EVAL_FREQ > 0 and disc_step % TRAIN_DISCRIMINATORS_EVAL_FREQ == 0
 
         if is_log_step:
             logging.info(train_tracker)
@@ -1081,24 +1172,25 @@ def train_discriminator_only(cfg: TrainPipelineConfig):
                 wandb_log_dict = _prefix_keys(train_tracker.to_dict(), f"discriminator_task{task_id}")
                 if output_dict:
                     wandb_log_dict.update(_prefix_keys(output_dict, f"discriminator_task{task_id}"))
-                wandb_logger.log_dict(wandb_log_dict, step, mode="train")
+                wandb_logger.log_dict(wandb_log_dict, disc_step, mode="train")
             train_tracker.reset_averages()
 
         if cfg.env and eval_env and is_eval_step:
-            _do_eval(cfg, step, policy, peft_modules, eval_env, env_preprocessor, env_postprocessor,
+            _do_eval(cfg, disc_step, policy, peft_modules, eval_env, env_preprocessor, env_postprocessor,
                      preprocessor, postprocessor, dataset, wandb_logger, accelerator)
 
         if cfg.save_checkpoint and is_saving_step:
-            logging.info(f"Checkpoint policy after step {step}")
-            checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
+            logging.info(f"Checkpoint policy after discriminator step {disc_step}")
+            checkpoint_dir = get_disc_step_checkpoint_dir(cfg.output_dir, TRAIN_DISCRIMINATORS_STEPS, disc_step)
 
             peft_policy.save_pretrained(str(checkpoint_dir / "adapter"))
 
             save_checkpoint(
-                checkpoint_dir, step, cfg, accelerator.unwrap_model(policy), optimizer, lr_scheduler,
+                checkpoint_dir, disc_step, cfg, accelerator.unwrap_model(policy), optimizer, lr_scheduler,
                 preprocessor=preprocessor, postprocessor=postprocessor,
             )
-            update_last_checkpoint(checkpoint_dir)
+            save_discriminator_training_state(checkpoint_dir, disc_step, optimizer, lr_scheduler)
+            update_last_disc_checkpoint(checkpoint_dir, cfg.output_dir, cfg.steps, disc_step)
 
     if eval_env:
         close_envs(eval_env)
