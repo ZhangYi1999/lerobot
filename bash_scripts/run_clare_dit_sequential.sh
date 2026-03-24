@@ -31,12 +31,20 @@ for i in "${!DATASETS[@]}"; do
     TASK_NAME="${TASK_NAMES[$i]}"
     OUTPUT_DIR="${OUTPUT_BASE}/${TASK_NAME}"
 
-    # Build PEFT args: task 0 uses config, subsequent tasks load previous checkpoint
+    # PEFT env vars: task 0 uses config, subsequent tasks load previous checkpoint
     if [ $i -eq 0 ]; then
-        PEFT_ARGS="--peft_cfg_path=${PEFT_CFG}"
+        export PEFT_CFG_PATH="${PEFT_CFG}"
+        unset PEFT_WEIGHT_PATH
     else
-        PEFT_ARGS="--peft_weight_path=${PREV_CHECKPOINT}/checkpoints/last/adapter/default"
+        export PEFT_WEIGHT_PATH="${PREV_CHECKPOINT}/checkpoints/last/adapter/default"
+        unset PEFT_CFG_PATH
     fi
+
+    # CLARE-specific env vars
+    export CLARE_PHASE="full"
+    export TRAIN_DISCRIMINATORS_STEPS=${DISC_STEPS}
+    export EXPAND_THRESHOLD=0.0
+    export AT_LEAST_EXPAND=shallowest
 
     echo "=========================================="
     echo "CLARE Task ${i}: ${DATASET}"
@@ -44,17 +52,13 @@ for i in "${!DATASETS[@]}"; do
 
     accelerate launch --mixed_precision=${MIXED_PRECISION} \
         -m lerobot.scripts.clare.clare \
-        --phase=full \
+        --use_policy_training_preset=false \
         --policy.type=dit \
         --policy.pretrained_path="${PRETRAINED_PATH}" \
         --policy.push_to_hub=false \
-        ${PEFT_ARGS} \
         --dataset.repo_id="continuallearning/${DATASET}" \
         --batch_size=${BATCH_SIZE} \
         --steps=${STEPS} \
-        --train_discriminators_steps=${DISC_STEPS} \
-        --expand_threshold=0.0 \
-        --at_least_expand=shallowest \
         --seed=${SEED} \
         --num_workers=16 \
         --eval_freq=0 \

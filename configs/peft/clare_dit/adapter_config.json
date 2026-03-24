@@ -2,7 +2,7 @@
     "peft_type": "CLARE",
     "target_modules": [
         {
-            "pattern": "policy\\.dit\\.velocity_net\\.cond_proj",
+            "pattern": "dit\\.velocity_net\\.cond_proj",
             "feature_dim": 2600,
             "out_feature_dim": 512,
             "batch_first": true,
@@ -26,7 +26,7 @@
             }
         },
         {
-            "pattern": "policy\\.dit\\.velocity_net\\.decoder\\.layers\\.(?P<layer_id>\\d+)\\.(attn|mlp)_(modulate\\.(scale|shift)|gate\\.scale)",
+            "pattern": "dit\\.velocity_net\\.decoder\\.layers\\.(?P<layer_id>\\d+)\\.(attn|mlp)_(modulate\\.(scale|shift)|gate\\.scale)",
             "feature_dim": 512,
             "out_feature_dim": 512,
             "batch_first": true,

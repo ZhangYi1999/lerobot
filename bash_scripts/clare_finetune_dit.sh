@@ -46,13 +46,19 @@ echo "=========================================="
 for i in "${!DATASETS[@]}"; do
     DATASET="${DATASETS[$i]}"
 
+    # CLARE-specific env vars
+    export CLARE_PHASE="discriminator_only"
+    export PEFT_WEIGHT_PATH="${CLARE_CHECKPOINT}"
+    export DISCRIMINATOR_TASK_ID=${i}
+    export TRAIN_DISCRIMINATORS_STEPS=${DISC_STEPS}
+    export TRAIN_DISCRIMINATORS_LOG_FREQ=${DISC_LOG_FREQ}
+    export TRAIN_DISCRIMINATORS_SAVE_FREQ=${DISC_STEPS}
+
     echo ""
     echo "--- Discriminator for task ${i}: ${DATASET} ---"
 
     python -m lerobot.scripts.clare.clare \
-        --phase=discriminator_only \
-        --peft_weight_path="${CLARE_CHECKPOINT}" \
-        --discriminator_task_id=${i} \
+        --use_policy_training_preset=false \
         --output_dir="${DISC_OUTPUT}" \
         --dataset.repo_id="continuallearning/${DATASET}" \
         --policy.type=dit \
@@ -62,9 +68,6 @@ for i in "${!DATASETS[@]}"; do
         --num_workers=16 \
         --seed=${SEED} \
         --eval_freq=0 \
-        --train_discriminators_steps=${DISC_STEPS} \
-        --train_discriminators_log_freq=${DISC_LOG_FREQ} \
-        --train_discriminators_save_freq=${DISC_STEPS} \
         --wandb.enable=true \
         --wandb.disable_artifact=true \
         --wandb.project=clare_rebuttal \
