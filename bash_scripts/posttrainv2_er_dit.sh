@@ -2,17 +2,13 @@
 set -e
 
 # ===== Configuration =====
-STEPS=40000
-SAVE_FREQ=40000
+STEPS=20000
+SAVE_FREQ=20000
 LOG_FREQ=100
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 export REUSE_PRETRAINED_NORMALIZATION="${REUSE_PRETRAINED_NORMALIZATION:-true}"
-START_TASK="${START_TASK:-3}"   # Set to resume from middle, e.g. START_TASK=1
+START_TASK="${START_TASK:-0}"   # Set to resume from middle, e.g. START_TASK=1
 SEED=1000
-
-# LoRA adapter config and merge-back for SeqLoRA
-export PEFT_CONFIG_PATH="configs/lora/dit_all_decoder"
-export MERGE_LORA_ADAPTER=true
 
 # Normalization source control:
 #   "pretrained" (default) — each task uses normalization from its own CHECKPOINTS[i]
@@ -21,23 +17,24 @@ export MERGE_LORA_ADAPTER=true
 NORM_MODE="${NORM_MODE:-union}"
 NORM_STATS_FILE="${NORM_STATS_FILE:-configs/union_stats.json}"
 
+# Task 0: plain dataset (no replay); tasks 1-4: ER merged datasets
+# Merge sequence: real_0 + real_1 → er_real_0_1 → + real_2 → er_real_0_2 → ... → er_real_0_4
 DATASETS=(
     "real_0_put_bowl_filtered"
-    "real_1_stack_bowls_filtered"
-    "real_2_put_moka_pot_filtered"
-    "real_3_close_drawer_filtered"
-    "real_4_put_lego_into_drawer_filtered"
+    "er_real_0_1"
+    "er_real_0_2"
+    "er_real_0_3"
+    "er_real_0_4"
 )
 
 # Pretrained checkpoint for each task (hub repo_id or local path).
 # CHECKPOINTS[i] is the starting checkpoint for DATASETS[i].
-# Because MERGE_LORA_ADAPTER=true, each checkpoint is a standard (merged) model.
 CHECKPOINTS=(
     "continuallearning/dit_fft_pretraining_v2_lerobot30_seed1000"
-    "continuallearning/dit_posttrainv2_seqlora_dit_all_decoder_real_0_put_bowl_filtered_seed${SEED}"
-    "continuallearning/dit_posttrainv2_seqlora_dit_all_decoder_real_1_stack_bowls_filtered_seed${SEED}"
-    "continuallearning/dit_posttrainv2_seqlora_dit_all_decoder_real_2_put_moka_pot_filtered_seed${SEED}"
-    "continuallearning/dit_posttrainv2_seqlora_dit_all_decoder_real_3_close_drawer_filtered_seed${SEED}"
+    "continuallearning/dit_posttrainv2_er_real_0_put_bowl_filtered_seed${SEED}"
+    "continuallearning/dit_posttrainv2_er_er_real_0_1_seed${SEED}"
+    "continuallearning/dit_posttrainv2_er_er_real_0_2_seed${SEED}"
+    "continuallearning/dit_posttrainv2_er_er_real_0_3_seed${SEED}"
 )
 
 # ===== Training Loop =====
@@ -48,7 +45,7 @@ for i in "${!DATASETS[@]}"; do
     fi
 
     DATASET="${DATASETS[$i]}"
-    REPO_ID="continuallearning/dit_posttrainv2_seqlora_dit_all_decoder_${DATASET}_seed${SEED}"
+    REPO_ID="continuallearning/dit_posttrainv2_er_${DATASET}_seed${SEED}"
     CURRENT_PRETRAINED="${CHECKPOINTS[$i]}"
 
     # ===== Normalization Source =====
@@ -62,7 +59,7 @@ for i in "${!DATASETS[@]}"; do
             unset NORM_CHECKPOINT_PATH
             echo "NORM_MODE=first, task 0: loading normalization from dataset"
         else
-            TASK0_REPO_ID="continuallearning/dit_posttrainv2_seqlora_dit_all_decoder_${DATASETS[0]}_seed${SEED}"
+            TASK0_REPO_ID="continuallearning/dit_posttrainv2_er_${DATASETS[0]}_seed${SEED}"
             export NORM_CHECKPOINT_PATH="${TASK0_REPO_ID}"
             echo "NORM_MODE=first, task ${i}: reusing normalization from ${TASK0_REPO_ID}"
         fi
@@ -75,13 +72,20 @@ for i in "${!DATASETS[@]}"; do
     JOB_NAME="${REPO_ID#continuallearning/}"
 
     echo "=========================================="
-    echo "SeqLoRA DiT: ${DATASET} (task=${i}, seed=${SEED})"
+    echo "ER DiT: ${DATASET} (task=${i}, seed=${SEED})"
     echo "  From: ${CURRENT_PRETRAINED}"
     echo "  To:   ${REPO_ID}"
     echo "=========================================="
 
+    # Task 0 is plain fine-tuning (no er_meta.json); tasks 1+ use ER batch sampler
+    if [ "$i" -eq 0 ]; then
+        TRAIN_MODULE="lerobot.scripts.lerobot_train"
+    else
+        TRAIN_MODULE="lerobot.scripts.clare.er"
+    fi
+
     accelerate launch --mixed_precision=${MIXED_PRECISION} \
-        -m lerobot.scripts.lerobot_train \
+        -m ${TRAIN_MODULE} \
         --job_name="${JOB_NAME}" \
         --output_dir="./outputs/train/${JOB_NAME}" \
         --dataset.repo_id="continuallearning/${DATASET}" \
@@ -90,9 +94,8 @@ for i in "${!DATASETS[@]}"; do
         --policy.pretrained_path="${CURRENT_PRETRAINED}" \
         --policy.push_to_hub=true \
         --policy.repo_id="${REPO_ID}" \
-        --policy.optimizer_lr=0.00014 \
-        --batch_size=128 \
-        --num_workers=16 \
+        --batch_size=256 \
+        --num_workers=8 \
         --steps=${STEPS} \
         --seed=${SEED} \
         --eval_freq=0 \
@@ -101,7 +104,10 @@ for i in "${!DATASETS[@]}"; do
         --wandb.enable=true \
         --wandb.disable_artifact=true \
         --wandb.project=clare_rebuttal \
-        --wandb.entity=470620104-technical-university-of-munich
+        --wandb.entity=470620104-technical-university-of-munich \
+        --policy.freeze_language_proj=true \
+        --policy.freeze_vision_proj=true \
+        --policy.freeze_state_proj=true
 done
 
-echo "All SeqLoRA DiT posttrain runs completed!"
+echo "All ER DiT posttrain runs completed!"

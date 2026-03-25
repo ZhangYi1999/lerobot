@@ -84,6 +84,7 @@ for i in "${!DATASETS[@]}"; do
         --job_name="${JOB_NAME}" \
         --output_dir="./outputs/train/${JOB_NAME}" \
         --dataset.repo_id="continuallearning/${DATASET}" \
+        --dataset.image_transforms.enable=true \
         --policy.type=dit \
         --policy.pretrained_path="${CURRENT_PRETRAINED}" \
         --policy.push_to_hub=true \
