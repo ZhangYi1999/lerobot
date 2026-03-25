@@ -635,28 +635,45 @@ def append_or_create_parquet_file(
 
 
 def _harmonize_episode_parquets(aggr_root: Path):
-    """Ensure all episode parquet files have a consistent schema.
+    """Ensure all episode parquet files have a consistent schema and self-referential indices.
 
     Source datasets may have different episode schemas (e.g. some include quantile
-    stats columns while others don't). This re-reads all files, concatenates them
-    (which handles column union and type coercion), and rewrites as a single file.
+    stats columns while others don't). When multiple files exist, this merges them
+    into a single file and updates the self-referential meta/episodes/chunk_index
+    and meta/episodes/file_index columns to point to the merged file.
     """
     episodes_dir = aggr_root / "meta" / "episodes"
     parquet_files = sorted(episodes_dir.rglob("*.parquet"))
     if len(parquet_files) <= 1:
+        # Even with a single file, fix up the self-referential indices
+        if len(parquet_files) == 1:
+            df = pd.read_parquet(parquet_files[0])
+            needs_fix = (
+                (df["meta/episodes/chunk_index"] != 0).any()
+                or (df["meta/episodes/file_index"] != 0).any()
+            )
+            if needs_fix:
+                df["meta/episodes/chunk_index"] = 0
+                df["meta/episodes/file_index"] = 0
+                df.to_parquet(parquet_files[0])
         return
 
     dfs = [pd.read_parquet(p) for p in parquet_files]
-    all_columns = [set(df.columns) for df in dfs]
-    if all(cols == all_columns[0] for cols in all_columns):
-        return
 
     logging.info("Harmonizing episode parquet schemas across files")
     merged = pd.concat(dfs, ignore_index=True)
 
+    # All episodes now live in a single file: chunk-000/file-000
+    merged["meta/episodes/chunk_index"] = 0
+    merged["meta/episodes/file_index"] = 0
+
     # Remove old files and write single harmonized file
     for p in parquet_files:
         p.unlink()
+    # Clean up empty chunk directories
+    for d in sorted(episodes_dir.iterdir(), reverse=True):
+        if d.is_dir() and not any(d.iterdir()):
+            d.rmdir()
     out_path = episodes_dir / "chunk-000" / "file-000.parquet"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     merged.to_parquet(out_path)
