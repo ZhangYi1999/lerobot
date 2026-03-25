@@ -26,6 +26,7 @@ import torch
 from accelerate import Accelerator
 from termcolor import colored
 from torch.optim import Optimizer
+from tqdm import tqdm
 
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
@@ -55,6 +56,7 @@ from lerobot.utils.utils import (
     format_big_number,
     has_method,
     init_logging,
+    inside_slurm,
 )
 
 from peft import get_peft_model, PeftConfig, PeftModel
@@ -820,6 +822,17 @@ def train_adapter(cfg: TrainPipelineConfig, skip_push_to_hub: bool = False):
         initial_step=step, accelerator=accelerator,
     )
 
+    is_main_process = accelerator.is_main_process
+    if is_main_process:
+        progbar = tqdm(
+            total=cfg.steps - local_step,
+            desc="Training (adapter)",
+            unit="step",
+            disable=inside_slurm(),
+            position=0,
+            leave=True,
+        )
+
     logging.info("Start training func adapters")
     for _ in range(local_step, cfg.steps):  # only remaining steps when resuming
         start_time = time.perf_counter()
@@ -834,6 +847,8 @@ def train_adapter(cfg: TrainPipelineConfig, skip_push_to_hub: bool = False):
 
         step += 1
         local_step += 1
+        if is_main_process:
+            progbar.update(1)
         train_tracker.step()
 
         is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0
@@ -864,6 +879,9 @@ def train_adapter(cfg: TrainPipelineConfig, skip_push_to_hub: bool = False):
                 preprocessor=preprocessor, postprocessor=postprocessor,
             )
             update_last_adapter_checkpoint(checkpoint_dir, cfg.output_dir, local_step)
+
+    if is_main_process:
+        progbar.close()
 
     if eval_env:
         close_envs(eval_env)
@@ -984,6 +1002,17 @@ def train_discriminator(cfg: TrainPipelineConfig, skip_expand: bool = False):
         initial_step=disc_step, accelerator=accelerator,
     )
 
+    is_main_process = accelerator.is_main_process
+    if is_main_process:
+        progbar = tqdm(
+            total=TRAIN_DISCRIMINATORS_STEPS - disc_step,
+            desc="Training (discriminator)",
+            unit="step",
+            disable=inside_slurm(),
+            position=0,
+            leave=True,
+        )
+
     logging.info("Start training discriminators")
     for _ in range(disc_step, TRAIN_DISCRIMINATORS_STEPS):  # only remaining steps when resuming
         start_time = time.perf_counter()
@@ -997,6 +1026,8 @@ def train_discriminator(cfg: TrainPipelineConfig, skip_expand: bool = False):
         )
 
         disc_step += 1
+        if is_main_process:
+            progbar.update(1)
         train_tracker.step()
 
         if disc_step == 1:
@@ -1031,6 +1062,9 @@ def train_discriminator(cfg: TrainPipelineConfig, skip_expand: bool = False):
             )
             save_discriminator_training_state(checkpoint_dir, disc_step, optimizer, lr_scheduler)
             update_last_disc_checkpoint(checkpoint_dir, cfg.output_dir, cfg.steps, disc_step)
+
+    if is_main_process:
+        progbar.close()
 
     if eval_env:
         close_envs(eval_env)
@@ -1159,6 +1193,17 @@ def train_discriminator_only(cfg: TrainPipelineConfig):
         initial_step=disc_step, accelerator=accelerator,
     )
 
+    is_main_process = accelerator.is_main_process
+    if is_main_process:
+        progbar = tqdm(
+            total=TRAIN_DISCRIMINATORS_STEPS - disc_step,
+            desc=f"Training (discriminator task {task_id})",
+            unit="step",
+            disable=inside_slurm(),
+            position=0,
+            leave=True,
+        )
+
     logging.info(f"Start training discriminator for task {task_id}")
     for _ in range(disc_step, TRAIN_DISCRIMINATORS_STEPS):  # only remaining steps when resuming
         start_time = time.perf_counter()
@@ -1172,6 +1217,8 @@ def train_discriminator_only(cfg: TrainPipelineConfig):
         )
 
         disc_step += 1
+        if is_main_process:
+            progbar.update(1)
         train_tracker.step()
 
         is_log_step = TRAIN_DISCRIMINATORS_LOG_FREQ > 0 and disc_step % TRAIN_DISCRIMINATORS_LOG_FREQ == 0
@@ -1203,6 +1250,9 @@ def train_discriminator_only(cfg: TrainPipelineConfig):
             )
             save_discriminator_training_state(checkpoint_dir, disc_step, optimizer, lr_scheduler)
             update_last_disc_checkpoint(checkpoint_dir, cfg.output_dir, cfg.steps, disc_step)
+
+    if is_main_process:
+        progbar.close()
 
     if eval_env:
         close_envs(eval_env)

@@ -102,6 +102,7 @@ for i in "${!DATASETS[@]}"; do
         --job_name="${JOB_NAME}" \
         --output_dir="${OUTPUT_DIR}" \
         --dataset.repo_id="continuallearning/${DATASET}" \
+        --dataset.image_transforms.enable=true \
         --policy.type=dit \
         --policy.pretrained_path="${PRETRAINED_PATH}" \
         --policy.push_to_hub=true \
