@@ -94,6 +94,10 @@ for i in "${!DATASETS[@]}"; do
         --policy.pretrained_path="${CURRENT_PRETRAINED}" \
         --policy.push_to_hub=true \
         --policy.repo_id="${REPO_ID}" \
+        --policy.freeze_language_proj=True \
+        --policy.freeze_vision_proj=True \
+        --policy.freeze_state_proj=True \
+        --policy.optimizer_lr=0.0002 \
         --batch_size=256 \
         --num_workers=8 \
         --steps=${STEPS} \
