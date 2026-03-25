@@ -29,12 +29,19 @@ DATASETS=(
 
 # Pretrained checkpoint for each task (hub repo_id or local path).
 # CHECKPOINTS[i] is the starting checkpoint for DATASETS[i].
+# To load from local outputs instead of hub, uncomment the local paths below:
 CHECKPOINTS=(
     "continuallearning/dit_fft_pretraining_v2_lerobot30_seed1000"
     "continuallearning/dit_posttrainv2_er_real_0_put_bowl_filtered_seed${SEED}"
     "continuallearning/dit_posttrainv2_er_er_real_0_1_seed${SEED}"
     "continuallearning/dit_posttrainv2_er_er_real_0_2_seed${SEED}"
     "continuallearning/dit_posttrainv2_er_er_real_0_3_seed${SEED}"
+    # --- Local checkpoint paths (uncomment to use instead of hub) ---
+    # "continuallearning/dit_fft_pretraining_v2_lerobot30_seed1000"
+    # "./outputs/train/dit_posttrainv2_er_real_0_put_bowl_filtered_seed${SEED}/checkpoints/last/pretrained_model"
+    # "./outputs/train/dit_posttrainv2_er_er_real_0_1_seed${SEED}/checkpoints/last/pretrained_model"
+    # "./outputs/train/dit_posttrainv2_er_er_real_0_2_seed${SEED}/checkpoints/last/pretrained_model"
+    # "./outputs/train/dit_posttrainv2_er_er_real_0_3_seed${SEED}/checkpoints/last/pretrained_model"
 )
 
 # ===== Training Loop =====
