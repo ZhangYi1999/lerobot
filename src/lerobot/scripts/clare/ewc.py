@@ -16,24 +16,22 @@
 """EWC (Elastic Weight Consolidation) baseline for continual learning.
 
 Each task is trained in a separate script invocation. EWC state (Fisher matrix +
-parameter checkpoint) is persisted to disk between tasks via ewc_state_path /
-ewc_save_path.
+parameter checkpoint) is persisted to disk between tasks via EWC_STATE_PATH /
+EWC_SAVE_PATH environment variables.
 
 Usage:
     # Task 1 (no prior state):
-    python ewc.py --config <cfg> --ewc_save_path outputs/ewc_state_task1.pt
+    EWC_SAVE_PATH=outputs/ewc_state_task1.pt python ewc.py --config <cfg>
 
     # Task 2 (with prior state):
-    python ewc.py --config <cfg> \\
-        --policy.pretrained_path outputs/task1/last_checkpoint \\
-        --ewc_state_path outputs/ewc_state_task1.pt \\
-        --ewc_save_path outputs/ewc_state_task2.pt
+    EWC_STATE_PATH=outputs/ewc_state_task1.pt \\
+    EWC_SAVE_PATH=outputs/ewc_state_task2.pt \\
+    python ewc.py --config <cfg> --policy.pretrained_path outputs/task1/last_checkpoint
 """
 import logging
 import os
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass, field
 from pprint import pformat
 from typing import Any
 
@@ -44,13 +42,11 @@ from torch.optim import Optimizer
 
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
-from lerobot.optim.optimizers import OptimizerConfig, AdamWConfig
-from lerobot.optim.schedulers import LRSchedulerConfig, DiffuserSchedulerConfig
-from lerobot.datasets.factory import make_dataset, resolve_delta_timestamps, IMAGENET_STATS
+from lerobot.optim.optimizers import AdamWConfig
+from lerobot.optim.schedulers import DiffuserSchedulerConfig
+from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.sampler import EpisodeAwareSampler
 from lerobot.datasets.utils import cycle
-from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
-from lerobot.datasets.transforms import ImageTransforms
 from lerobot.envs.factory import make_env, make_env_pre_post_processors
 from lerobot.envs.utils import close_envs
 from lerobot.optim.factory import make_optimizer_and_scheduler
@@ -82,33 +78,14 @@ REUSE_PRETRAINED_NORMALIZATION: bool = os.environ.get("REUSE_PRETRAINED_NORMALIZ
 # Takes priority over REUSE_PRETRAINED_NORMALIZATION.
 NORM_STATS_FILE: str | None = os.environ.get("NORM_STATS_FILE")
 
+# EWC-specific parameters (passed via environment variables)
+EWC_LAMBDA: float = float(os.environ.get("EWC_LAMBDA", "50000.0"))
+EWC_GAMMA: float = float(os.environ.get("EWC_GAMMA", "0.9"))
+EWC_STATE_PATH: str | None = os.environ.get("EWC_STATE_PATH")
+EWC_FISHER_BATCHES: int = int(os.environ.get("EWC_FISHER_BATCHES", "200"))
+EWC_SAVE_PATH: str | None = os.environ.get("EWC_SAVE_PATH")
 
-@dataclass
-class EWCTrainPipelineConfig(TrainPipelineConfig):
-    # GR00T training defaults
-    seed: int | None = 42
-    batch_size: int = 32
-    steps: int = 10_000
-    log_freq: int = 100
-    save_freq: int = 10_000
-    eval_freq: int = 10_000
-    use_policy_training_preset: bool = False
-    optimizer: OptimizerConfig | None = field(
-        default_factory=lambda: AdamWConfig(
-            lr=1e-4, betas=(0.95, 0.999), weight_decay=1e-5, eps=1e-8, grad_clip_norm=1.0
-        )
-    )
-    scheduler: LRSchedulerConfig | None = field(
-        default_factory=lambda: DiffuserSchedulerConfig(name="cosine", num_warmup_steps=500)
-    )
-    # EWC-specific
-    ewc_lambda: float = 50000.0       # penalty weight (same as LIBERO/GR00T default)
-    ewc_gamma: float = 0.9            # Fisher decay for online EWC across tasks
-    ewc_state_path: str | None = None  # load previous Fisher + checkpoint (.pt)
-    ewc_fisher_batches: int = 200     # batches used to estimate Fisher after training
-    ewc_save_path: str | None = None  # where to save updated EWC state after training
-
-    max_episodes_rendered: int = 100
+MAX_EPISODES_RENDERED: int = int(os.environ.get("MAX_EPISODES_RENDERED", "100"))
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +251,16 @@ def update_policy(
 # ---------------------------------------------------------------------------
 
 @parser.wrap()
-def train(cfg: EWCTrainPipelineConfig):
+def train(cfg: TrainPipelineConfig):
+    # EWC uses fixed optimizer/scheduler defaults when policy preset is not used
+    if not cfg.use_policy_training_preset:
+        if cfg.optimizer is None:
+            cfg.optimizer = AdamWConfig(
+                lr=1e-4, betas=(0.95, 0.999), weight_decay=1e-5, eps=1e-8, grad_clip_norm=1.0
+            )
+        if cfg.scheduler is None:
+            cfg.scheduler = DiffuserSchedulerConfig(name="cosine", num_warmup_steps=500)
+
     cfg.validate()
 
     from accelerate.utils import DistributedDataParallelKwargs
@@ -309,9 +295,9 @@ def train(cfg: EWCTrainPipelineConfig):
     ewc_checkpoint = None
     task_count = 0
 
-    if cfg.ewc_state_path is not None:
-        logging.info(f"Loading EWC state from {cfg.ewc_state_path}")
-        ewc_state = load_ewc_state(cfg.ewc_state_path, device)
+    if EWC_STATE_PATH is not None:
+        logging.info(f"Loading EWC state from {EWC_STATE_PATH}")
+        ewc_state = load_ewc_state(EWC_STATE_PATH, device)
         fish = ewc_state["fish"].to(device)
         ewc_checkpoint = ewc_state["checkpoint"].to(device)
         task_count = ewc_state["task_count"]
@@ -404,7 +390,7 @@ def train(cfg: EWCTrainPipelineConfig):
     logging.info(f"{dataset.num_episodes=}")
     logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
     logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
-    logging.info(f"EWC lambda={cfg.ewc_lambda}, gamma={cfg.ewc_gamma}, fisher_batches={cfg.ewc_fisher_batches}")
+    logging.info(f"EWC lambda={EWC_LAMBDA}, gamma={EWC_GAMMA}, fisher_batches={EWC_FISHER_BATCHES}")
 
     # ------------------------------------------------------------------
     # Dataloader
@@ -474,7 +460,7 @@ def train(cfg: EWCTrainPipelineConfig):
             accelerator=accelerator,
             fish=fish,
             checkpoint=ewc_checkpoint,
-            ewc_lambda=cfg.ewc_lambda,
+            ewc_lambda=EWC_LAMBDA,
             lr_scheduler=lr_scheduler,
         )
 
@@ -506,7 +492,7 @@ def train(cfg: EWCTrainPipelineConfig):
                     postprocessor=postprocessor,
                     n_episodes=cfg.eval.n_episodes,
                     videos_dir=cfg.output_dir / "eval" / f"videos_step_{step_id}",
-                    max_episodes_rendered=cfg.max_episodes_rendered,
+                    max_episodes_rendered=MAX_EPISODES_RENDERED,
                     start_seed=cfg.seed,
                 )
             aggregated = eval_info["overall"]
@@ -545,7 +531,7 @@ def train(cfg: EWCTrainPipelineConfig):
     # ------------------------------------------------------------------
     # Post-training: compute Fisher + accumulate + save EWC state
     # ------------------------------------------------------------------
-    if cfg.ewc_save_path is not None:
+    if EWC_SAVE_PATH is not None:
         logging.info("Computing Fisher information matrix on current task data...")
 
         # Build a fresh (non-cycled) dataloader for Fisher estimation
@@ -566,13 +552,13 @@ def train(cfg: EWCTrainPipelineConfig):
             fisher_dataloader,
             preprocessor,
             accelerator,
-            cfg.ewc_fisher_batches,
+            EWC_FISHER_BATCHES,
         )
 
         # Online EWC: accumulate with gamma decay
         if fish is not None:
-            accumulated_fish = cfg.ewc_gamma * fish + new_fish
-            logging.info(f"Accumulated Fisher with gamma={cfg.ewc_gamma}")
+            accumulated_fish = EWC_GAMMA * fish + new_fish
+            logging.info(f"Accumulated Fisher with gamma={EWC_GAMMA}")
         else:
             accumulated_fish = new_fish
 
@@ -584,11 +570,11 @@ def train(cfg: EWCTrainPipelineConfig):
             accumulated_fish,
             new_checkpoint,
             task_count + 1,
-            cfg.ewc_save_path,
+            EWC_SAVE_PATH,
         )
     else:
         logging.info(
-            "ewc_save_path not set — skipping Fisher computation and EWC state save."
+            "EWC_SAVE_PATH not set — skipping Fisher computation and EWC state save."
         )
 
     if eval_env:

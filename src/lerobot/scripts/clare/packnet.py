@@ -17,7 +17,6 @@ import logging
 import os
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass, field
 from pathlib import Path
 from pprint import pformat
 from typing import Any
@@ -30,8 +29,8 @@ from safetensors.torch import save_file, load_file
 
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
-from lerobot.optim.optimizers import OptimizerConfig, AdamWConfig
-from lerobot.optim.schedulers import LRSchedulerConfig, DiffuserSchedulerConfig
+from lerobot.optim.optimizers import AdamWConfig
+from lerobot.optim.schedulers import DiffuserSchedulerConfig
 from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.sampler import EpisodeAwareSampler
 from lerobot.datasets.utils import cycle
@@ -67,38 +66,19 @@ REUSE_PRETRAINED_NORMALIZATION: bool = os.environ.get("REUSE_PRETRAINED_NORMALIZ
 # Takes priority over REUSE_PRETRAINED_NORMALIZATION.
 NORM_STATS_FILE: str | None = os.environ.get("NORM_STATS_FILE")
 
+# PackNet-specific parameters (passed via environment variables)
+PACKNET_CURRENT_TASK: int = int(os.environ.get("PACKNET_CURRENT_TASK", "0"))
+PACKNET_PRUNE_RATIO: float = float(os.environ.get("PACKNET_PRUNE_RATIO", "0.75"))
+PACKNET_POST_PRUNE_STEPS: int = int(os.environ.get("PACKNET_POST_PRUNE_STEPS", "20000"))
+PACKNET_IGNORE_MODULES: str = os.environ.get("PACKNET_IGNORE_MODULES", "")
 
-@dataclass
-class PackNetTrainPipelineConfig(TrainPipelineConfig):
-    # GR00T training defaults
-    seed: int | None = 42
-    batch_size: int = 32
-    steps: int = 10_000
-    log_freq: int = 100
-    save_freq: int = 10_000
-    eval_freq: int = 10_000
-    use_policy_training_preset: bool = False
-    optimizer: OptimizerConfig | None = field(
-        default_factory=lambda: AdamWConfig(
-            lr=1e-4, betas=(0.95, 0.999), weight_decay=1e-5, eps=1e-8, grad_clip_norm=1.0
-        )
-    )
-    scheduler: LRSchedulerConfig | None = field(
-        default_factory=lambda: DiffuserSchedulerConfig(name="cosine", num_warmup_steps=500)
-    )
-    # PackNet-specific
-    current_task: int = 0
-    prune_ratio: float = 0.75
-    post_prune_steps: int = 20000
-    ignore_modules: str | None = None
-
-    max_episodes_rendered: int = 100
+MAX_EPISODES_RENDERED: int = int(os.environ.get("MAX_EPISODES_RENDERED", "100"))
 
 
 @torch.no_grad()
-def prune(cfg: PackNetTrainPipelineConfig, policy: torch.nn.Module, previous_mask: dict):
+def prune(policy: torch.nn.Module, previous_mask: dict):
     """
-    Prune cfg.prune_ratio of current_task's weights (by magnitude).
+    Prune PACKNET_PRUNE_RATIO of current_task's weights (by magnitude).
     mask keys are layer names (from named_modules).
     Returns new mask dict.
     """
@@ -112,7 +92,7 @@ def prune(cfg: PackNetTrainPipelineConfig, policy: torch.nn.Module, previous_mas
         layer_mask = previous_mask[name].clone().to(weight.device)
 
         # Select weights belonging to current task
-        select = layer_mask.eq(cfg.current_task + 1)
+        select = layer_mask.eq(PACKNET_CURRENT_TASK + 1)
 
         if select.sum().item() == 0:
             current_masks[name] = layer_mask
@@ -120,7 +100,7 @@ def prune(cfg: PackNetTrainPipelineConfig, policy: torch.nn.Module, previous_mas
             tensor = weight[select]
             abs_tensor = tensor.abs()
 
-            top_k = int(round(cfg.prune_ratio * tensor.numel()))
+            top_k = int(round(PACKNET_PRUNE_RATIO * tensor.numel()))
             if top_k <= 0:
                 current_masks[name] = layer_mask
                 continue
@@ -210,7 +190,16 @@ def update_policy(
 
 
 @parser.wrap()
-def train(cfg: PackNetTrainPipelineConfig):
+def train(cfg: TrainPipelineConfig):
+    # PackNet uses fixed optimizer/scheduler defaults when policy preset is not used
+    if not cfg.use_policy_training_preset:
+        if cfg.optimizer is None:
+            cfg.optimizer = AdamWConfig(
+                lr=1e-4, betas=(0.95, 0.999), weight_decay=1e-5, eps=1e-8, grad_clip_norm=1.0
+            )
+        if cfg.scheduler is None:
+            cfg.scheduler = DiffuserSchedulerConfig(name="cosine", num_warmup_steps=500)
+
     cfg.validate()
 
     from accelerate.utils import DistributedDataParallelKwargs
@@ -303,9 +292,9 @@ def train(cfg: PackNetTrainPipelineConfig):
         **postprocessor_kwargs,
     )
 
-    ignore_modules = [ignore_module.strip() for ignore_module in cfg.ignore_modules.split(",") if ignore_module.strip()]
+    ignore_modules = [ignore_module.strip() for ignore_module in PACKNET_IGNORE_MODULES.split(",") if ignore_module.strip()]
 
-    if cfg.current_task > 0:
+    if PACKNET_CURRENT_TASK > 0:
         logging.info("Loading previous mask")
 
         mask = load_file(Path(cfg.policy.pretrained_path) / "mask.safetensors", cfg.policy.device)
@@ -319,7 +308,7 @@ def train(cfg: PackNetTrainPipelineConfig):
                 continue
             if name in mask.keys():
                 layer_mask = mask[name]
-                layer_mask[layer_mask.eq(0)] = cfg.current_task + 1
+                layer_mask[layer_mask.eq(0)] = PACKNET_CURRENT_TASK + 1
             elif "BatchNorm" in str(type(module)) or "LayerNorm" in str(type(module)):
                 module.eval()
 
@@ -412,7 +401,7 @@ def train(cfg: PackNetTrainPipelineConfig):
     )
 
     logging.info("Start offline training on a fixed dataset")
-    for _ in range(step, cfg.steps + cfg.post_prune_steps):
+    for _ in range(step, cfg.steps + PACKNET_POST_PRUNE_STEPS):
         start_time = time.perf_counter()
         batch = next(dl_iter)
         batch = preprocessor(batch)
@@ -426,14 +415,14 @@ def train(cfg: PackNetTrainPipelineConfig):
             cfg.optimizer.grad_clip_norm,
             accelerator=accelerator,
             mask=mask,
-            current_task=cfg.current_task,
+            current_task=PACKNET_CURRENT_TASK,
             lr_scheduler=lr_scheduler,
         )
 
         step += 1
         train_tracker.step()
         is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0
-        is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps or step == cfg.steps + cfg.post_prune_steps
+        is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps or step == cfg.steps + PACKNET_POST_PRUNE_STEPS
         is_eval_step = cfg.eval_freq > 0 and (step % cfg.eval_freq == 0 or step == cfg.steps)
 
         if is_log_step:
@@ -458,7 +447,7 @@ def train(cfg: PackNetTrainPipelineConfig):
                     postprocessor=postprocessor,
                     n_episodes=cfg.eval.n_episodes,
                     videos_dir=cfg.output_dir / "eval" / f"videos_step_{step_id}",
-                    max_episodes_rendered=cfg.max_episodes_rendered,
+                    max_episodes_rendered=MAX_EPISODES_RENDERED,
                     start_seed=cfg.seed,
                 )
             aggregated = eval_info["overall"]
@@ -504,7 +493,7 @@ def train(cfg: PackNetTrainPipelineConfig):
 
         if step == cfg.steps:
             logging.info("Prune the mask")
-            mask = prune(cfg, accelerator.unwrap_model(policy), mask)
+            mask = prune(accelerator.unwrap_model(policy), mask)
 
             # Switch to post-prune optimizer
             post_prune_optimizer, post_prune_lr_scheduler = accelerator.prepare(

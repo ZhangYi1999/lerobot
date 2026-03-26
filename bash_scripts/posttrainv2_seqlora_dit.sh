@@ -8,7 +8,24 @@ LOG_FREQ=100
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 export REUSE_PRETRAINED_NORMALIZATION="${REUSE_PRETRAINED_NORMALIZATION:-true}"
 START_TASK="${START_TASK:-3}"   # Set to resume from middle, e.g. START_TASK=1
+DEBUG="${DEBUG:-false}"
 SEED=1000
+
+# Debug mode overrides
+if [ "$DEBUG" = "true" ]; then
+    STEPS=10
+    SAVE_FREQ=10
+    LOG_FREQ=1
+    BATCH_SIZE=128
+    PUSH_TO_HUB=false
+    WANDB_ENABLE=true
+    WANDB_PROJECT="debug"
+else
+    BATCH_SIZE=128
+    PUSH_TO_HUB=true
+    WANDB_ENABLE=true
+    WANDB_PROJECT="clare_rebuttal"
+fi
 
 # LoRA adapter config and merge-back for SeqLoRA
 export PEFT_CONFIG_PATH="configs/lora/dit_all_decoder"
@@ -88,19 +105,19 @@ for i in "${!DATASETS[@]}"; do
         --dataset.image_transforms.enable=true \
         --policy.type=dit \
         --policy.pretrained_path="${CURRENT_PRETRAINED}" \
-        --policy.push_to_hub=true \
+        --policy.push_to_hub=${PUSH_TO_HUB} \
         --policy.repo_id="${REPO_ID}" \
         --policy.optimizer_lr=0.00014 \
-        --batch_size=128 \
+        --batch_size=${BATCH_SIZE} \
         --num_workers=16 \
         --steps=${STEPS} \
         --seed=${SEED} \
         --eval_freq=0 \
         --save_freq=${SAVE_FREQ} \
         --log_freq=${LOG_FREQ} \
-        --wandb.enable=true \
+        --wandb.enable=${WANDB_ENABLE} \
         --wandb.disable_artifact=true \
-        --wandb.project=clare_rebuttal \
+        --wandb.project=${WANDB_PROJECT} \
         --wandb.entity=470620104-technical-university-of-munich
 done
 

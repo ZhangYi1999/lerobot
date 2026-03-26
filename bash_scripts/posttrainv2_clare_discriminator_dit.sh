@@ -14,7 +14,23 @@ DISC_BATCH_SIZE=256
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 export REUSE_PRETRAINED_NORMALIZATION="${REUSE_PRETRAINED_NORMALIZATION:-true}"
 START_TASK="${START_TASK:-0}"
+DEBUG="${DEBUG:-false}"
 SEED=1000
+
+# Debug mode overrides
+if [ "$DEBUG" = "true" ]; then
+    DISC_STEPS=10
+    DISC_SAVE_FREQ=10
+    DISC_LOG_FREQ=1
+    DISC_BATCH_SIZE=256
+    PUSH_TO_HUB=false
+    WANDB_ENABLE=true
+    WANDB_PROJECT="debug"
+else
+    PUSH_TO_HUB=true
+    WANDB_ENABLE=true
+    WANDB_PROJECT="clare_rebuttal"
+fi
 
 # Normalization
 NORM_MODE="${NORM_MODE:-union}"
@@ -86,15 +102,15 @@ for i in "${!DATASETS[@]}"; do
         --dataset.repo_id="continuallearning/${DATASET}" \
         --policy.type=dit \
         --policy.pretrained_path="${PRETRAINED_PATH}" \
-        --policy.push_to_hub=true \
+        --policy.push_to_hub=${PUSH_TO_HUB} \
         --policy.repo_id="${REPO_ID}" \
         --batch_size=${DISC_BATCH_SIZE} \
         --num_workers=8 \
         --seed=${SEED} \
         --eval_freq=0 \
-        --wandb.enable=true \
+        --wandb.enable=${WANDB_ENABLE} \
         --wandb.disable_artifact=true \
-        --wandb.project=clare_rebuttal \
+        --wandb.project=${WANDB_PROJECT} \
         --wandb.entity=470620104-technical-university-of-munich
 done
 
