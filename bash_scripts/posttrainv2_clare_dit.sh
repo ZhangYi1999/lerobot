@@ -6,13 +6,33 @@ STEPS=20000
 SAVE_FREQ=20000
 LOG_FREQ=100
 DISC_STEPS=10000
+DISC_LOG_FREQ=1
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 export REUSE_PRETRAINED_NORMALIZATION="${REUSE_PRETRAINED_NORMALIZATION:-true}"
 START_TASK="${START_TASK:-0}"   # Set to resume from middle, e.g. START_TASK=1
+DEBUG="${DEBUG:-true}"
 SEED=1000
 
+# Debug mode overrides
+if [ "$DEBUG" = "true" ]; then
+    STEPS=10
+    DISC_STEPS=10
+    SAVE_FREQ=10
+    LOG_FREQ=1
+    DISC_LOG_FREQ=1
+    BATCH_SIZE=256
+    PUSH_TO_HUB=false
+    WANDB_ENABLE=true
+    WANDB_PROJECT="debug"
+else
+    BATCH_SIZE=256
+    PUSH_TO_HUB=true
+    WANDB_ENABLE=true
+    WANDB_PROJECT="clare_rebuttal"
+fi
+
 # CLARE adapter config
-PEFT_CFG="configs/peft/clare_dit"
+PEFT_CFG="configs/peft/clare_dit_cond_proj"
 
 # Normalization source control:
 #   "pretrained" (default) — each task uses normalization from its own CHECKPOINTS[i]
@@ -40,14 +60,14 @@ for i in "${!DATASETS[@]}"; do
         echo "Skipping task ${i} (START_TASK=${START_TASK})"
         # Still track the output dir for adapter chaining
         DATASET="${DATASETS[$i]}"
-        REPO_ID="continuallearning/dit_posttrainv2_clare_dit_${DATASET}_seed${SEED}"
+        REPO_ID="continuallearning/dit_posttrainv2_clare_dit_cond_proj_${DATASET}_seed${SEED}"
         JOB_NAME="${REPO_ID#continuallearning/}"
         PREV_OUTPUT_DIR="./outputs/train/${JOB_NAME}"
         continue
     fi
 
     DATASET="${DATASETS[$i]}"
-    REPO_ID="continuallearning/dit_posttrainv2_clare_dit_${DATASET}_seed${SEED}"
+    REPO_ID="continuallearning/dit_posttrainv2_clare_dit_cond_proj_${DATASET}_seed${SEED}"
 
     # Local job name / output dir mirrors the hub repo_id suffix
     JOB_NAME="${REPO_ID#continuallearning/}"
@@ -85,6 +105,7 @@ for i in "${!DATASETS[@]}"; do
     # CLARE-specific env vars
     export CLARE_PHASE="full"
     export TRAIN_DISCRIMINATORS_STEPS=${DISC_STEPS}
+    export TRAIN_DISCRIMINATORS_LOG_FREQ=${DISC_LOG_FREQ}
     export EXPAND_THRESHOLD=0.0
     export AT_LEAST_EXPAND=shallowest
 
@@ -105,18 +126,18 @@ for i in "${!DATASETS[@]}"; do
         --dataset.image_transforms.enable=true \
         --policy.type=dit \
         --policy.pretrained_path="${PRETRAINED_PATH}" \
-        --policy.push_to_hub=true \
+        --policy.push_to_hub=${PUSH_TO_HUB} \
         --policy.repo_id="${REPO_ID}" \
-        --batch_size=256 \
+        --batch_size=${BATCH_SIZE} \
         --num_workers=8 \
         --steps=${STEPS} \
         --seed=${SEED} \
         --eval_freq=0 \
         --save_freq=${SAVE_FREQ} \
         --log_freq=${LOG_FREQ} \
-        --wandb.enable=true \
+        --wandb.enable=${WANDB_ENABLE} \
         --wandb.disable_artifact=true \
-        --wandb.project=clare_rebuttal \
+        --wandb.project=${WANDB_PROJECT} \
         --wandb.entity=470620104-technical-university-of-munich
 
     PREV_OUTPUT_DIR="${OUTPUT_DIR}"

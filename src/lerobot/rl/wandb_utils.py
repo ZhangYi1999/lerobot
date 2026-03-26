@@ -158,16 +158,11 @@ class WandBLogger:
     def log_dict(
         self, d: dict, step: int | None = None, mode: str = "train", custom_step_key: str | None = None
     ):
-        if mode not in {"train", "eval"}:
-            raise ValueError(mode)
         if step is None and custom_step_key is None:
             raise ValueError("Either step or custom_step_key must be provided.")
 
-        # NOTE: This is not simple. Wandb step must always monotonically increase and it
-        # increases with each wandb.log call, but in the case of asynchronous RL for example,
-        # multiple time steps is possible. For example, the interaction step with the environment,
-        # the training step, the evaluation step, etc. So we need to define a custom step key
-        # to log the correct step for each metric.
+        # Handle custom_step_key for RL asynchronous training where multiple
+        # independent step counters exist within the same mode.
         if custom_step_key is not None:
             if self._wandb_custom_step_key is None:
                 self._wandb_custom_step_key = set()
@@ -176,28 +171,28 @@ class WandBLogger:
                 self._wandb_custom_step_key.add(new_custom_key)
                 self._wandb.define_metric(new_custom_key, hidden=True)
 
+        # Batch all metrics into a single wandb.log() call for efficiency.
+        batch_data = {}
         for k, v in d.items():
             if not isinstance(v, (int | float | str)):
                 logging.warning(
                     f'WandB logging of key "{k}" was ignored as its type "{type(v)}" is not handled by this wrapper.'
                 )
                 continue
-
-            # Do not log the custom step key itself.
+            # Do not log the custom step key itself as a metric.
             if self._wandb_custom_step_key is not None and k in self._wandb_custom_step_key:
                 continue
+            batch_data[f"{mode}/{k}"] = v
 
-            if custom_step_key is not None:
-                value_custom_step = d[custom_step_key]
-                data = {f"{mode}/{k}": v, f"{mode}/{custom_step_key}": value_custom_step}
-                self._wandb.log(data)
-                continue
+        if not batch_data:
+            return
 
-            self._wandb.log(data={f"{mode}/{k}": v}, step=step)
+        if custom_step_key is not None:
+            batch_data[f"{mode}/{custom_step_key}"] = d[custom_step_key]
+            self._wandb.log(batch_data)
+        else:
+            self._wandb.log(batch_data, step=step)
 
     def log_video(self, video_path: str, step: int, mode: str = "train"):
-        if mode not in {"train", "eval"}:
-            raise ValueError(mode)
-
         wandb_video = self._wandb.Video(video_path, fps=self.env_fps, format="mp4")
         self._wandb.log({f"{mode}/video": wandb_video}, step=step)

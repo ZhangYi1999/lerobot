@@ -302,11 +302,10 @@ def detect_distribution_shift(
         if is_log_step:
             logging.info(detect_tracker)
             if wandb_logger:
-                wandb_log_dict = _prefix_keys(detect_tracker.to_dict(), "detect_shift")
                 wandb_step = step
                 if global_steps > 0:
                     wandb_step += global_steps
-                wandb_logger.log_dict(wandb_log_dict, wandb_step, mode='train')
+                wandb_logger.log_dict(detect_tracker.to_dict(), wandb_step, mode='detect_shift', custom_step_key="steps")
             detect_tracker.reset_averages()
 
     z_scores_mean = {}
@@ -422,7 +421,7 @@ def update_policy(
     return train_metrics, output_dict
 
 
-def _setup_common(cfg: TrainPipelineConfig):
+def _setup_common(cfg: TrainPipelineConfig, wandb_logger=None):
     """Shared setup for both adapter and discriminator training phases.
 
     Returns:
@@ -439,13 +438,13 @@ def _setup_common(cfg: TrainPipelineConfig):
     )
 
     init_logging(accelerator=accelerator)
-    logging.info(pformat(cfg.to_dict()))
 
-    if cfg.wandb.enable and cfg.wandb.project:
-        wandb_logger = WandBLogger(cfg)
-    else:
-        wandb_logger = None
-        logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
+    if wandb_logger is None:
+        logging.info(pformat(cfg.to_dict()))
+        if cfg.wandb.enable and cfg.wandb.project:
+            wandb_logger = WandBLogger(cfg)
+        else:
+            logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
 
     if cfg.seed is not None:
         set_seed(cfg.seed, accelerator=accelerator)
@@ -670,6 +669,7 @@ def _expand_layers(
 def _do_eval(
     cfg, step, policy, peft_modules, eval_env, env_preprocessor, env_postprocessor,
     preprocessor, postprocessor, dataset, wandb_logger, accelerator,
+    eval_mode: str = "eval",
 ):
     """Run evaluation, temporarily stopping gradients on PEFT modules."""
     step_id = get_step_identifier(step, cfg.steps)
@@ -721,18 +721,18 @@ def _do_eval(
     logging.info(eval_tracker)
     if wandb_logger:
         wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
-        wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
+        wandb_logger.log_dict(wandb_log_dict, step, mode=eval_mode)
         if eval_info.get("overall", {}).get("video_paths"):
-            wandb_logger.log_video(eval_info["overall"]["video_paths"][-1], step, mode="eval")
+            wandb_logger.log_video(eval_info["overall"]["video_paths"][-1], step, mode=eval_mode)
 
 
-def train_adapter(cfg: TrainPipelineConfig, skip_push_to_hub: bool = False):
+def train_adapter(cfg: TrainPipelineConfig, skip_push_to_hub: bool = False, wandb_logger=None):
     """Phase 1: Expand layers and train func_adapters only."""
     (accelerator, device, dataset, eval_env, env_preprocessor, env_postprocessor,
-     policy, peft_policy, peft_modules, peft_config, preprocessor, postprocessor, wandb_logger) = _setup_common(cfg)
+     policy, peft_policy, peft_modules, peft_config, preprocessor, postprocessor, wandb_logger) = _setup_common(cfg, wandb_logger=wandb_logger)
 
     # Expand layers
-    adapter_params, discriminator_params, step = _expand_layers(
+    adapter_params, discriminator_params, detect_shift_step = _expand_layers(
         cfg, wandb_logger, policy, peft_modules, peft_config, dataset, preprocessor, accelerator
     )
 
@@ -745,13 +745,13 @@ def train_adapter(cfg: TrainPipelineConfig, skip_push_to_hub: bool = False):
 
     # global_step_offset: steps consumed by the detection phase (0 for task 0).
     # local_step: steps within THIS adapter training phase (0 → cfg.steps).
-    global_step_offset = step
+    global_step_offset = detect_shift_step
     local_step = 0
     if cfg.resume:
         local_step, adapter_optimizer, adapter_lr_scheduler = load_training_state(
             cfg.checkpoint_path, adapter_optimizer, adapter_lr_scheduler
         )
-    step = global_step_offset + local_step  # global counter for WandB
+    step = local_step  # global counter for WandB
 
     num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     num_adapter_params = sum(p.numel() for p in adapter_params)
@@ -825,7 +825,7 @@ def train_adapter(cfg: TrainPipelineConfig, skip_push_to_hub: bool = False):
     is_main_process = accelerator.is_main_process
     if is_main_process:
         progbar = tqdm(
-            total=cfg.steps - local_step,
+            total=cfg.steps,
             desc="Training (adapter)",
             unit="step",
             disable=inside_slurm(),
@@ -861,7 +861,12 @@ def train_adapter(cfg: TrainPipelineConfig, skip_push_to_hub: bool = False):
                 wandb_log_dict = train_tracker.to_dict()
                 if output_dict:
                     wandb_log_dict.update(output_dict)
-                wandb_logger.log_dict(wandb_log_dict, step, mode="train")
+                wandb_logger.log_dict(
+                    wandb_log_dict,
+                    step + global_step_offset,
+                    mode="train",
+                    custom_step_key="steps"
+                )
             train_tracker.reset_averages()
 
         if cfg.env and eval_env and is_eval_step:
@@ -897,12 +902,13 @@ def train_adapter(cfg: TrainPipelineConfig, skip_push_to_hub: bool = False):
 
     accelerator.wait_for_everyone()
     accelerator.end_training()
+    return step + global_step_offset
 
 
-def train_discriminator(cfg: TrainPipelineConfig, skip_expand: bool = False):
+def train_discriminator(cfg: TrainPipelineConfig, skip_expand: bool = False, wandb_logger=None, wandb_step_offset: int = 0):
     """Phase 2: Train discriminators only (loads adapter checkpoint)."""
     (accelerator, device, dataset, eval_env, env_preprocessor, env_postprocessor,
-     policy, peft_policy, peft_modules, peft_config, preprocessor, postprocessor, wandb_logger) = _setup_common(cfg)
+     policy, peft_policy, peft_modules, peft_config, preprocessor, postprocessor, wandb_logger) = _setup_common(cfg, wandb_logger=wandb_logger)
 
     if skip_expand:
         # In "full" mode, layers are already expanded — just collect existing discriminator params
@@ -1040,15 +1046,16 @@ def train_discriminator(cfg: TrainPipelineConfig, skip_expand: bool = False):
         if is_log_step:
             logging.info(train_tracker)
             if wandb_logger:
-                wandb_log_dict = _prefix_keys(train_tracker.to_dict(), "discriminator")
+                wandb_log_dict = train_tracker.to_dict()
                 if output_dict:
-                    wandb_log_dict.update(_prefix_keys(output_dict, "discriminator"))
-                wandb_logger.log_dict(wandb_log_dict, disc_step, mode="train")
+                    wandb_log_dict.update(output_dict)
+                wandb_logger.log_dict(wandb_log_dict, disc_step + wandb_step_offset, mode="train_disc", custom_step_key="steps")
             train_tracker.reset_averages()
 
         if cfg.env and eval_env and is_eval_step:
-            _do_eval(cfg, disc_step, policy, peft_modules, eval_env, env_preprocessor, env_postprocessor,
-                     preprocessor, postprocessor, dataset, wandb_logger, accelerator)
+            _do_eval(cfg, disc_step + wandb_step_offset, policy, peft_modules, eval_env, env_preprocessor, env_postprocessor,
+                     preprocessor, postprocessor, dataset, wandb_logger, accelerator,
+                     eval_mode="eval_disc")
 
         if cfg.save_checkpoint and is_saving_step:
             logging.info(f"Checkpoint policy after discriminator step {disc_step}")
@@ -1228,15 +1235,16 @@ def train_discriminator_only(cfg: TrainPipelineConfig):
         if is_log_step:
             logging.info(train_tracker)
             if wandb_logger:
-                wandb_log_dict = _prefix_keys(train_tracker.to_dict(), f"discriminator_task{task_id}")
+                wandb_log_dict = train_tracker.to_dict()
                 if output_dict:
-                    wandb_log_dict.update(_prefix_keys(output_dict, f"discriminator_task{task_id}"))
-                wandb_logger.log_dict(wandb_log_dict, disc_step, mode="train")
+                    wandb_log_dict.update(output_dict)
+                wandb_logger.log_dict(wandb_log_dict, disc_step, mode="train_disc")
             train_tracker.reset_averages()
 
         if cfg.env and eval_env and is_eval_step:
             _do_eval(cfg, disc_step, policy, peft_modules, eval_env, env_preprocessor, env_postprocessor,
-                     preprocessor, postprocessor, dataset, wandb_logger, accelerator)
+                     preprocessor, postprocessor, dataset, wandb_logger, accelerator,
+                     eval_mode="eval_disc")
 
         if cfg.save_checkpoint and is_saving_step:
             logging.info(f"Checkpoint policy after discriminator step {disc_step}")
@@ -1302,7 +1310,12 @@ def train(cfg: TrainPipelineConfig):
     elif CLARE_PHASE == "discriminator_only":
         train_discriminator_only(cfg)
     else:  # "full" — original behavior
-        train_adapter(cfg, skip_push_to_hub=True)
+        # Create a shared wandb logger so both phases log to the same run
+        if cfg.wandb.enable and cfg.wandb.project:
+            shared_wandb_logger = WandBLogger(cfg)
+        else:
+            shared_wandb_logger = None
+        final_step = train_adapter(cfg, skip_push_to_hub=True, wandb_logger=shared_wandb_logger)
         # Free adapter optimizer states (Adam m/v) before discriminator phase.
         # train_adapter's locals are out of scope but PyTorch's caching allocator
         # holds VRAM until explicitly flushed.
@@ -1314,7 +1327,7 @@ def train(cfg: TrainPipelineConfig):
         adapter_ckpt = (Path(cfg.output_dir) / "checkpoints" / "last" / "adapter").resolve()
         PEFT_WEIGHT_PATH = str(adapter_ckpt)
         PEFT_CFG_PATH = None
-        train_discriminator(cfg, skip_expand=True)
+        train_discriminator(cfg, skip_expand=True, wandb_logger=shared_wandb_logger, wandb_step_offset=final_step)
 
 
 if __name__ == "__main__":
