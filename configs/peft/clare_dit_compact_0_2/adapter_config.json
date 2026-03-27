@@ -26,7 +26,7 @@
             }
         },
         {
-            "pattern": "dit\\.velocity_net\\.decoder\\.layers\\.(?P<layer_id>\\[0-2])",
+            "pattern": "dit\\.velocity_net\\.decoder\\.layers\\.(?P<layer_id>[0-2])",
             "feature_dim": 512,
             "out_feature_dim": 512,
             "batch_first": false,
