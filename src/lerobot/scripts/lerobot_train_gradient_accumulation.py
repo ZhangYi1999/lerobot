@@ -8,8 +8,8 @@ via HuggingFace Accelerate. Configure accumulation steps through accelerate:
     # Option A: accelerate config → set gradient_accumulation_steps in YAML
     accelerate launch -m lerobot.scripts.lerobot_train_gradient_accumulation ...
 
-    # Option B: CLI flag
-    accelerate launch --gradient_accumulation_steps 4 \
+    # Option B: env var (recommended — works reliably across accelerate versions)
+    GRADIENT_ACCUMULATION_STEPS=8 accelerate launch \
         -m lerobot.scripts.lerobot_train_gradient_accumulation ...
 
 Semantics:
@@ -17,7 +17,7 @@ Semantics:
     - Total micro-batches = cfg.steps × gradient_accumulation_steps
     - Effective batch size = batch_size × num_processes × gradient_accumulation_steps
     - log_freq, save_freq, eval_freq all count optimizer steps
-    - Default gradient_accumulation_steps = 2 (override via accelerate config or CLI)
+    - Default gradient_accumulation_steps = 2 (override via GRADIENT_ACCUMULATION_STEPS env var)
 """
 
 import copy
@@ -160,11 +160,12 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     if accelerator is None:
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         force_cpu = cfg.policy.device == "cpu"
+        grad_accum = int(os.environ.get("GRADIENT_ACCUMULATION_STEPS", 2))
         accelerator = Accelerator(
             step_scheduler_with_optimizer=False,
             kwargs_handlers=[ddp_kwargs],
             cpu=force_cpu,
-            gradient_accumulation_steps=2,
+            gradient_accumulation_steps=grad_accum,
         )
 
     grad_accum_steps = accelerator.gradient_accumulation_steps
