@@ -1,0 +1,109 @@
+# DAgger (Dataset Aggregation)
+
+DAgger is an interactive imitation-learning algorithm that closes the gap between behavioral cloning
+and the states a policy actually visits at deployment time. The **student** policy acts in the
+environment, an **expert** policy relabels every visited state, and the aggregated expert-labeled data
+is used to keep training the student. Because the student explores its own state distribution while the
+expert supplies the "correct" action for each of those states, DAgger corrects the compounding-error
+problem of pure behavioral cloning.
+
+LeRobot ships a DAgger loop as `lerobot-dagger`, built on top of the same gym-env rollout and policy
+training building blocks used by `lerobot-eval` and `lerobot-train`.
+
+## Algorithm
+
+Each of the `n_iterations` rounds runs two phases:
+
+1. **Mixed rollout & relabeling.** The student rolls out in the (vectorized) environment. On every
+   step the expert also produces an action for the same observation — that expert action is stored as
+   the supervision target. The *executed* action is drawn from the expert with probability `beta` and
+   from the student otherwise, so the visited-state distribution shifts smoothly from expert-induced to
+   student-induced as `beta` decays.
+2. **Aggregated training.** The expert-labeled frames are appended to a growing on-disk
+   `LeRobotDataset`, and the student is optimized for `steps_per_iteration` gradient steps on the whole
+   aggregated dataset.
+
+Evaluation always uses the **pure student** (no expert mixing), and success rate is logged per
+iteration.
+
+### Beta scheduling
+
+`beta` is the probability of executing the expert's action during collection:
+
+- `init_beta` — starting value (1.0 means "start fully on-expert").
+- `beta_schedule` — `exponential` (default), `linear`, or `constant`.
+- `beta_decay` — decay factor applied each iteration.
+- `beta_min` — lower bound (default 0.05).
+
+| schedule | formula |
+|---|---|
+| `exponential` | `max(beta_min, init_beta * beta_decay ** iteration)` |
+| `linear` | `max(beta_min, init_beta - (1 - beta_decay) * iteration)` |
+| `constant` | `init_beta` |
+
+## Requirements
+
+The student and the expert are both ordinary LeRobot policies loaded from a pretrained path. The
+student **must** be pretrained (e.g. from a `lerobot-train` run) so that its normalization statistics and
+processors are available for both rollout and training.
+
+```bash
+pip install 'lerobot[evaluation]'   # gym-env rollout + dataset
+# plus the policy extra, e.g. lerobot[pi], and the environment extra, e.g. lerobot[libero]
+```
+
+## Usage
+
+```bash
+lerobot-dagger \
+    --env.type=libero \
+    --policy.path=outputs/train/student/checkpoints/last/pretrained_model \
+    --expert_policy.path=lerobot/pi0_libero \
+    --dagger.n_iterations=20 \
+    --dagger.episodes_per_iteration=10 \
+    --dagger.steps_per_iteration=500 \
+    --dagger.init_beta=1.0 \
+    --dagger.beta_schedule=exponential \
+    --dagger.beta_decay=0.9 \
+    --dagger.beta_min=0.05 \
+    --dagger.eval_n_episodes=20
+```
+
+The student is checkpointed every iteration under
+`outputs/dagger/<date>/<time>_<job>/checkpoints/<iter>/pretrained_model`, and a `checkpoints/last`
+pointer is written at the end. Any checkpoint can be evaluated with `lerobot-eval`:
+
+```bash
+lerobot-eval \
+    --policy.path=outputs/dagger/.../checkpoints/last/pretrained_model \
+    --env.type=libero \
+    --eval.n_episodes=50
+```
+
+## Key configuration options
+
+All DAgger-specific options live under `--dagger.*` (see `DAggerConfig`):
+
+| option | default | description |
+|---|---|---|
+| `n_iterations` | 20 | number of collect+train rounds |
+| `episodes_per_iteration` | 10 | episodes collected per round |
+| `rollout_batch_size` | `episodes_per_iteration` | parallel environments during collection |
+| `steps_per_iteration` | 500 | student gradient steps per round |
+| `batch_size` | 8 | training batch size |
+| `only_save_expert` | `false` | keep only frames where the expert action was executed |
+| `only_success` | `false` | keep only frames from successful episodes |
+| `init_beta` / `beta_schedule` / `beta_decay` / `beta_min` | 1.0 / exponential / 0.99 / 0.05 | beta schedule |
+| `eval_freq` / `eval_n_episodes` | 1 / 20 | pure-student evaluation cadence |
+
+Both policies accept a rename map to align observation keys with the environment
+(`--rename_map` for the student, `--expert_rename_map` for the expert).
+
+## Metrics
+
+A `dagger_metrics.json` summary is written to the output directory, and per iteration the run logs:
+
+- `success_once` — pure-student success rate (the recommended headline metric).
+- `actor_loss` — supervised loss on the expert-labeled samples.
+- `buffer_num_episodes` / `buffer_num_frames` — size of the aggregated dataset.
+- `beta` — the expert-action probability used for that round.

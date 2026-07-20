@@ -19,6 +19,8 @@
     title: Train a Robot with RL
   - local: hilserl_sim
     title: Train RL in Simulation
+  - local: dagger
+    title: DAgger (Dataset Aggregation)
   - local: multi_gpu_training
     title: Multi GPU training
   - local: hil_data_collection
